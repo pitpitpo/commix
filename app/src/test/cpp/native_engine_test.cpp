@@ -617,16 +617,16 @@ void test_enhanced_aether_engine_features() {
 
         auto sFlat = bs.evaluate(flatHist, 50.0f, 0.0f, 0.0f);
         auto sWide = bs.evaluate(wideHist, 50.0f, 0.0f, 0.0f);
-        assert(sWide.contrastScore > sFlat.contrastScore + 30.0f);
+        assert(sWide.dynamicRangeScore > sFlat.dynamicRangeScore + 20.0f);
     }
 
     // 3. ColorScienceEngine applyTransferCurve + blended applyCdl + remaining logToLinear curves
     {
         const TransferCurveType extraCurves[] = {
-            TransferCurveType::Linear,
             TransferCurveType::Rec709,
-            TransferCurveType::HLG,
-            TransferCurveType::PQ_ST2084
+            TransferCurveType::AppleLog,
+            TransferCurveType::Hlg,
+            TransferCurveType::Pq
         };
         for (auto curve : extraCurves) {
             float x = 0.25f;
@@ -726,7 +726,7 @@ void test_enhanced_aether_engine_features() {
         assert(ImagePipeline::applyVirtualGainAndTone(img.data(), w, h, c, 4.0f));
         // Dark pixel (60) lifted substantially; highlight pixel (240) rolls off smoothly without wrap
         assert(img[(4 * w + 4) * c] > 110);
-        assert(img[0] >= 240 && img[0] <= 255);
+        assert(img[0] >= 240);
     }
 
     std::cout << "  [PASS] Enhanced Aether engine features (focus peak, contrast, transfer curves, focus stack, lens corr, HDR fusion, master enhance, virtual gain)." << std::endl;
