@@ -172,77 +172,82 @@ void ImagePipeline::applyUnsharpMask(
     float amount,
     float radius
 ) noexcept {
-    if (!pixelData || width < 3 || height < 3 || channels < 3 || amount <= 0.0f) return;
+    if (!pixelData || width <= 0 || height <= 0 || channels < 3) return;
 
-    // Build normalized 1D Gaussian kernel sized from `radius` (sigma = max(radius, 0.5)).
-    const float sigma = std::clamp(radius, 0.5f, 16.0f);
-    const int kRadius = std::max(1, static_cast<int>(std::ceil(sigma * 2.5f)));
-    const int kSize = 2 * kRadius + 1;
-    std::vector<float> kernel(static_cast<size_t>(kSize));
-    float kSum = 0.0f;
-    const float invTwoSigmaSq = 1.0f / (2.0f * sigma * sigma);
-    for (int i = -kRadius; i <= kRadius; ++i) {
-        const float w = std::exp(-static_cast<float>(i * i) * invTwoSigmaSq);
-        kernel[static_cast<size_t>(i + kRadius)] = w;
-        kSum += w;
+    const float weight = std::clamp(amount, 0.0f, 2.0f);
+    if (weight <= 0.001f) return;
+
+    // radius (pixels) -> odd kernel half-width R, sigma = R / 3.0
+    int R = static_cast<int>(std::ceil(radius));
+    if (R < 1) R = 1;
+    if (R > 32) R = 32;
+    const int maxR = std::min(width, height) - 1;
+    if (R > maxR) R = maxR;
+    if (R < 1) return;
+
+    const float sigma = R / 3.0f;
+    const int k = 2 * R + 1;
+    std::vector<float> kernel(k);
+    float ksum = 0.0f;
+    for (int i = -R; i <= R; ++i) {
+        const float w = std::exp(-(static_cast<float>(i) * i) / (2.0f * sigma * sigma));
+        kernel[i + R] = w;
+        ksum += w;
     }
-    const float invKSum = 1.0f / kSum;
-    for (float& w : kernel) w *= invKSum;
+    for (float& w : kernel) w /= ksum;
 
-    // Single intermediate float buffer (50% less RAM than storing a duplicate float copy of src).
-    const size_t totalPixels = static_cast<size_t>(width) * static_cast<size_t>(height);
-    std::vector<float> horiz(totalPixels * 3);
-    const size_t srcRowStride = static_cast<size_t>(width) * static_cast<size_t>(channels);
-    const size_t tmpRowStride = static_cast<size_t>(width) * 3;
+    const size_t pixels = static_cast<size_t>(width) * height;
+    std::vector<float> src(pixels * 3);
+    std::vector<float> tmp(pixels * 3);
+    for (size_t i = 0; i < pixels; ++i) {
+        src[i * 3 + 0] = pixelData[i * channels + 0];
+        src[i * 3 + 1] = pixelData[i * channels + 1];
+        src[i * 3 + 2] = pixelData[i * channels + 2];
+    }
 
-    // Pass 1: Multi-threaded horizontal 1D Gaussian directly from pixelData -> horiz
-    ThreadPool::instance().parallelFor(height, [&](int yStart, int yEnd) {
-        for (int y = yStart; y < yEnd; ++y) {
-            const uint8_t* srcRow = pixelData + static_cast<size_t>(y) * srcRowStride;
-            float* dstRow = horiz.data() + static_cast<size_t>(y) * tmpRowStride;
-            for (int x = 0; x < width; ++x) {
-                float rAcc = 0.0f, gAcc = 0.0f, bAcc = 0.0f;
-                for (int k = -kRadius; k <= kRadius; ++k) {
-                    const int sx = std::clamp(x + k, 0, width - 1);
-                    const float w = kernel[static_cast<size_t>(k + kRadius)];
-                    const size_t sIdx = static_cast<size_t>(sx) * channels;
-                    rAcc += static_cast<float>(srcRow[sIdx + 0]) * w;
-                    gAcc += static_cast<float>(srcRow[sIdx + 1]) * w;
-                    bAcc += static_cast<float>(srcRow[sIdx + 2]) * w;
-                }
-                const size_t dIdx = static_cast<size_t>(x) * 3;
-                dstRow[dIdx + 0] = rAcc;
-                dstRow[dIdx + 1] = gAcc;
-                dstRow[dIdx + 2] = bAcc;
+    // Horizontal pass: src -> tmp with clamp-to-edge
+    for (int y = 0; y < height; ++y) {
+        const float* srow = &src[static_cast<size_t>(y) * width * 3];
+        float* trow = &tmp[static_cast<size_t>(y) * width * 3];
+        for (int x = 0; x < width; ++x) {
+            float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f;
+            for (int i = -R; i <= R; ++i) {
+                int xx = x + i;
+                xx = (xx < 0) ? 0 : ((xx >= width) ? width - 1 : xx);
+                const float w = kernel[i + R];
+                a0 += srow[xx * 3 + 0] * w;
+                a1 += srow[xx * 3 + 1] * w;
+                a2 += srow[xx * 3 + 2] * w;
             }
+            trow[x * 3 + 0] = a0;
+            trow[x * 3 + 1] = a1;
+            trow[x * 3 + 2] = a2;
         }
-    });
+    }
 
-    // Pass 2: Multi-threaded vertical 1D Gaussian + in-place unsharp combine -> pixelData
-    ThreadPool::instance().parallelFor(height, [&](int yStart, int yEnd) {
-        for (int y = yStart; y < yEnd; ++y) {
-            uint8_t* dstRow = pixelData + static_cast<size_t>(y) * srcRowStride;
-            for (int x = 0; x < width; ++x) {
-                float rBlur = 0.0f, gBlur = 0.0f, bBlur = 0.0f;
-                const size_t xOff = static_cast<size_t>(x) * 3;
-                for (int k = -kRadius; k <= kRadius; ++k) {
-                    const int sy = std::clamp(y + k, 0, height - 1);
-                    const float w = kernel[static_cast<size_t>(k + kRadius)];
-                    const float* tPx = horiz.data() + static_cast<size_t>(sy) * tmpRowStride + xOff;
-                    rBlur += tPx[0] * w;
-                    gBlur += tPx[1] * w;
-                    bBlur += tPx[2] * w;
-                }
-                const size_t idx = static_cast<size_t>(x) * channels;
-                const float rOrig = static_cast<float>(dstRow[idx + 0]);
-                const float gOrig = static_cast<float>(dstRow[idx + 1]);
-                const float bOrig = static_cast<float>(dstRow[idx + 2]);
-                dstRow[idx + 0] = clampByte(rOrig + (rOrig - rBlur) * amount);
-                dstRow[idx + 1] = clampByte(gOrig + (gOrig - gBlur) * amount);
-                dstRow[idx + 2] = clampByte(bOrig + (bOrig - bBlur) * amount);
+    // Vertical pass + blend: out = clamp(center + weight * (center - blurred))
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            float b0 = 0.0f, b1 = 0.0f, b2 = 0.0f;
+            for (int i = -R; i <= R; ++i) {
+                int yy = y + i;
+                yy = (yy < 0) ? 0 : ((yy >= height) ? height - 1 : yy);
+                const float w = kernel[i + R];
+                const float* p = &tmp[(static_cast<size_t>(yy) * width + x) * 3];
+                b0 += p[0] * w;
+                b1 += p[1] * w;
+                b2 += p[2] * w;
             }
+            const size_t o = static_cast<size_t>(y) * width + x;
+            uint8_t* px = pixelData + o * channels;
+            const float c0 = src[o * 3 + 0];
+            const float c1 = src[o * 3 + 1];
+            const float c2 = src[o * 3 + 2];
+            px[0] = static_cast<uint8_t>(std::clamp(c0 + weight * (c0 - b0), 0.0f, 255.0f));
+            px[1] = static_cast<uint8_t>(std::clamp(c1 + weight * (c1 - b1), 0.0f, 255.0f));
+            px[2] = static_cast<uint8_t>(std::clamp(c2 + weight * (c2 - b2), 0.0f, 255.0f));
         }
-    });
+    }
 }
 
 bool ImagePipeline::aetherMasterEnhance(
