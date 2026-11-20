@@ -7,7 +7,21 @@ plugins {
 android {
     namespace = "com.txor.commix"
     compileSdk = 35
-    ndkVersion = "27.2.12479018"
+    val envNdk = System.getenv("ANDROID_NDK_HOME")
+        ?: System.getenv("ANDROID_NDK_ROOT")
+        ?: System.getenv("ANDROID_NDK")
+    if (!envNdk.isNullOrBlank() && file(envNdk).exists()) {
+        ndkPath = envNdk
+    } else {
+        val sdkHome = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "/usr/local/lib/android/sdk"
+        val ndkDir = file("$sdkHome/ndk")
+        val availableNdk = if (ndkDir.exists()) ndkDir.listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name } else null
+        if (availableNdk != null) {
+            ndkPath = availableNdk.absolutePath
+        } else {
+            ndkVersion = "27.2.12479018"
+        }
+    }
 
     defaultConfig {
         applicationId = "com.txor.commix"
