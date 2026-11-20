@@ -369,7 +369,8 @@ bool ComputationalPhotoEngine::stackFocusSlices(
                                    + luma(x + 1, y - 1) + 2 * luma(x + 1, y) + luma(x + 1, y + 1);
                     const int gy = -luma(x - 1, y - 1) - 2 * luma(x, y - 1) - luma(x + 1, y - 1)
                                    + luma(x - 1, y + 1) + 2 * luma(x, y + 1) + luma(x + 1, y + 1);
-                    const int energy = std::abs(gx) + std::abs(gy);
+                    const int lap = std::abs(4 * luma(x, y) - luma(x - 1, y) - luma(x + 1, y) - luma(x, y - 1) - luma(x, y + 1));
+                    const int energy = std::abs(gx) + std::abs(gy) + lap;
                     if (energy > maxEnergy) {
                         maxEnergy = energy;
                         bestSlice = s;
