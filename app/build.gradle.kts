@@ -10,17 +10,23 @@ android {
     val envNdk = System.getenv("ANDROID_NDK_HOME")
         ?: System.getenv("ANDROID_NDK_ROOT")
         ?: System.getenv("ANDROID_NDK")
-    if (!envNdk.isNullOrBlank() && file(envNdk).exists()) {
-        ndkPath = envNdk
+    val resolvedNdk = if (!envNdk.isNullOrBlank() && file(envNdk).exists()) {
+        file(envNdk)
     } else {
         val sdkHome = System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "/usr/local/lib/android/sdk"
         val ndkDir = file("$sdkHome/ndk")
-        val availableNdk = if (ndkDir.exists()) ndkDir.listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name } else null
-        if (availableNdk != null) {
-            ndkPath = availableNdk.absolutePath
-        } else {
-            ndkVersion = "27.2.12479018"
-        }
+        if (ndkDir.exists()) ndkDir.listFiles()?.filter { it.isDirectory }?.maxByOrNull { it.name } else null
+    }
+
+    if (resolvedNdk != null && resolvedNdk.exists()) {
+        ndkPath = resolvedNdk.absolutePath
+        val propsFile = file("${resolvedNdk.absolutePath}/source.properties")
+        val ver = if (propsFile.exists()) {
+            propsFile.readLines().firstOrNull { it.startsWith("Pkg.Revision") }?.substringAfter("=")?.trim()
+        } else null
+        ndkVersion = if (!ver.isNullOrBlank()) ver else resolvedNdk.name
+    } else {
+        ndkVersion = "27.2.12479018"
     }
 
     defaultConfig {
