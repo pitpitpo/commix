@@ -34,17 +34,15 @@ float ColorScienceEngine::linearToLog(float x, TransferCurveType curve) noexcept
             return (x > cut) ? (c * std::log10(a * x + b) + d) : (e * x + f);
         }
         case TransferCurveType::ArriLogC4: {
-            // ARRI LogC4 official specification
-            constexpr float a = 2231.8263090676883f;   // (2^18 - 16) / 117.45
-            constexpr float b = 64.0f;                 // (1023 - 95) / 1023
-            constexpr float c = 0.0647954196341293f;   // 95 / 1023
-            constexpr float s = 0.1135972086105891f;   // (7 * ln(2) * 2^(7 - 14*c/b)) / (a * s)
-            constexpr float t = -0.0180569961199113f;  // (2^(14*(-c/b) + 6) - 64) / a
+            constexpr float a = 2231.826309f;
+            constexpr float b = 0.907135875f;
+            constexpr float c = 0.092864125f;
+            constexpr float s = 0.113597209f;
+            constexpr float t = -0.018056996f;
             if (x >= t) {
-                return (std::log2(a * x + b) - 6.0f) / 14.0f * (1.0f - c) + c;
-            } else {
-                return (x - t) / s;
+                return (std::log2(a * x + 64.0f) - 6.0f) / 14.0f * b + c;
             }
+            return (x - t) / s;
         }
         case TransferCurveType::SonySLog3: {
             if (x >= 0.01125000f) {
@@ -127,16 +125,16 @@ float ColorScienceEngine::logToLinear(float y, TransferCurveType curve) noexcept
             return (y > yCut) ? ((std::pow(10.0f, (y - d) / c) - b) / a) : ((y - f) / e);
         }
         case TransferCurveType::ArriLogC4: {
-            constexpr float a = 2231.8263090676883f;
-            constexpr float c = 0.0647954196341293f;
-            constexpr float s = 0.1135972086105891f;
-            constexpr float t = -0.0180569961199113f;
+            constexpr float a = 2231.826309f;
+            constexpr float b = 0.907135875f;
+            constexpr float c = 0.092864125f;
+            constexpr float s = 0.113597209f;
+            constexpr float t = -0.018056996f;
             if (y >= 0.0f) {
-                const float expTerm = ((y - c) / (1.0f - c)) * 14.0f + 6.0f;
-                return (std::pow(2.0f, expTerm) - 64.0f) / a;
-            } else {
-                return y * s + t;
+                const float p = 14.0f * (y - c) / b + 6.0f;
+                return (std::pow(2.0f, p) - 64.0f) / a;
             }
+            return y * s + t;
         }
         case TransferCurveType::SonySLog3: {
             constexpr float yCut = 171.2102946929f / 1023.0f;
