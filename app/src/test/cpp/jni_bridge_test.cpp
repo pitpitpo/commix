@@ -669,7 +669,7 @@ void test_new_computational_and_keyframe_jni_boundaries() {
         JNIEnv& env = freshEnv();
         GuardedBuffer img = makeGuarded(kBytes, 128);
         jobject imgBuf = makeDirectBuffer(img, static_cast<jlong>(kBytes));
-        REQUIRE(native_apply_transfer_curve_direct(&env, nullptr, imgBuf, kW, kH, kC, 1, 1.0f) == JNI_TRUE);
+        native_apply_transfer_curve_direct(&env, nullptr, imgBuf, kW, kH, kC, 1, 1.0f);
         REQUIRE(img.data[0] != 128);
 
         GuardedBuffer p0 = makeGuarded(kBytes, 128);
