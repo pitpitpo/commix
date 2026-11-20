@@ -237,6 +237,17 @@ struct _JNIEnv {
         (void)ref;
     }
 
+    void GetFloatArrayRegion(jfloatArray array, jsize start, jsize len, jfloat* values) {
+        commix_jni_stub::noteCall();
+        auto* fa = static_cast<commix_jni_stub::FloatArrayObject*>(array);
+        if (!fa || start < 0 || len < 0 ||
+            static_cast<size_t>(start) + static_cast<size_t>(len) > fa->data.size()) {
+            commix_jni_stub::raiseException("java.lang.ArrayIndexOutOfBoundsException");
+            return;
+        }
+        for (jsize i = 0; i < len; ++i) values[i] = fa->data[static_cast<size_t>(start + i)];
+    }
+
     void SetFloatArrayRegion(jfloatArray array, jsize start, jsize len, const jfloat* values) {
         commix_jni_stub::noteCall();
         commix_jni_stub::envState().setFloatArrayRegionCalls++;
