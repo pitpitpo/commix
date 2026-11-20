@@ -63,17 +63,16 @@ void ImagePipeline::initToneLuts() noexcept {
         for (int i = 0; i < 256; ++i) {
             float x = i / 255.0f;
 
-            // FilmPrint: Soft S-curve with rich shadows and highlight roll-off
-            float film = 1.0f / (1.0f + std::exp(-6.0f * (x - 0.5f)));
-            film = (film - 0.0474f) / (0.9526f - 0.0474f); // normalize to 0..1
+            // FilmPrint: Gentle shadow rolloff, contrasty midtones, compressed highlights
+            float film = 1.0f / (1.0f + std::exp(-7.0f * (x - 0.45f)));
             s_filmPrintLut[i] = static_cast<uint8_t>(std::clamp(film * 255.0f, 0.0f, 255.0f));
 
-            // CineD: Flat cinematic dynamic range curve lifting shadows and compressing highlights
-            float cine = std::pow(x, 0.85f) * 0.92f + 0.04f;
+            // CineD: Flatter shadows and highlights for maximum dynamic range
+            float cine = std::pow(x, 0.85f);
             s_cineDLut[i] = static_cast<uint8_t>(std::clamp(cine * 255.0f, 0.0f, 255.0f));
 
-            // Neutral: Slight organic filmic contrast
-            float neut = x + 0.03f * std::sin(x * 3.14159265f * 2.0f - 3.14159265f);
+            // Neutral: Smooth filmic gamma 2.2 curve
+            float neut = std::pow(x, 1.0f / 1.15f);
             s_neutralLut[i] = static_cast<uint8_t>(std::clamp(neut * 255.0f, 0.0f, 255.0f));
         }
         s_lutsInitialized = true;
