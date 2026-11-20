@@ -1,0 +1,270 @@
+package com.txor.commix.model
+
+import androidx.compose.runtime.Immutable
+import com.txor.commix.CameraProbeResult
+import com.txor.commix.SpatialTargetNode
+
+@Immutable
+data class CameraUiState(
+    val ready: Boolean = false,
+    val activeMode: String = "PHOTO",
+    val isRecording: Boolean = false,
+    val recordingSeconds: Int = 0,
+    val isCapturing: Boolean = false,
+    val activeCameraId: String = "0",
+    val availableCameras: List<CameraProbeResult> = emptyList(),
+
+    // Pro Exposure Parameters
+    val iso: Int = 0, // 0 = Auto
+    val shutterNs: Long = 0L, // 0L = Auto
+    val shutterAngleDeg: Double = 180.0,
+    val evStops: Float = 0.0f,
+    val evStep: Float = 0.1f,
+    val wbKelvin: Int = 0, // 0 = Auto
+    val focusDiopters: Float = -1.0f, // -1.0f = AF
+    val zoomRatio: Double = 1.0,
+    val maxZoomRatio: Double = 10.0,
+
+    // Formats & Resolution
+    val photoFormat: String = "jpeg",
+    val photoQuality: Int = 95,
+    val targetPhotoMp: Double = 0.0,
+    val maxLensMp: Double = 0.0,
+    val isHiResActive: Boolean = false,
+    val videoResolution: String = "1920x1080",
+    val videoFps: Int = 30,
+    val videoFpsFloat: Double = 30.0,
+    val videoBitrateBps: Int = 50000000,
+
+    // Dynamic Preview & Viewport Geometry
+    val previewWidth: Int = 1920,
+    val previewHeight: Int = 1080,
+    val previewAspectRatio: Float = 3f / 4f,
+
+    // Optics & Stabilization
+    val oisMode: String = "standard",
+    val eisMode: String = "legend",
+    val flashMode: String = "off",
+
+    // Color Science & Process Zero
+    val toneCurve: String = "neutral",
+    val filmGrain: String = "off",
+    val grainIntensity: Float = 1.0f,
+    val lutLook: String = "none",
+    val lutBlend: Float = 1.0f,
+    val activeOemProfile: String = "standard",
+    val isProcessZeroActive: Boolean = false,
+    val processZeroIntensity: Float = 1.0f,
+
+    // Advanced Cinema Optics & Rigging
+    val shutterAngleLocked: Boolean = false,
+    val wbTint: Float = 0.0f,
+    val ndFilter: String = "off",
+    val anamorphicRatio: Float = 1.0f,
+    val aebEnabled: Boolean = false,
+    val aebShots: Int = 3,
+    val aebSpreadEv: Float = 1.0f,
+    val aebHdrFusion: Boolean = true,
+    val isTrueRawAvailable: Boolean = false,
+    val audioGainDb: Float = 0.0f,
+    val audioLowCut: Boolean = false,
+    val spaceZoomLockEngaged: Boolean = false,
+    val estimatedTimeRemainingMinutes: Int = 180,
+
+    // Production Clapperboard Slate
+    val slateRoll: String = "A",
+    val slateScene: String = "1",
+    val slateTake: String = "1",
+
+    // UI & Scopes Toggles
+    val showScopes: Boolean = false,
+    val showHistogram: Boolean = false,
+    val showWaveform: Boolean = false,
+    val showRgbParade: Boolean = false,
+    val showVectorscope: Boolean = false,
+    val showHorizonLeveler: Boolean = false,
+    val showGrid: Boolean = false,
+    val showProControls: Boolean = false,
+    val azimuthDeg: Float = 0.0f,
+    val pitchDeg: Float = 0.0f,
+    val rollDeg: Float = 0.0f,
+    val sensorOrientation: Int = 90,
+
+    // Telemetry & Best Shot
+    val lumaHistogram: IntArray = IntArray(256),
+    val waveformCols: FloatArray = FloatArray(64),
+    val paradeR: FloatArray = FloatArray(64),
+    val paradeG: FloatArray = FloatArray(64),
+    val paradeB: FloatArray = FloatArray(64),
+    val vectorscopeSamples: FloatArray = FloatArray(0),
+    val vectorscopeCount: Int = 0,
+    val audioDb: Float = -60f,
+    val audioNorm: Float = 0f,
+    val spotIre: Float = 50f,
+    val hiClipPct: Float = 0f,
+    val loClipPct: Float = 0f,
+    val afDistanceDiopters: Float = 0f,
+    val afState: Int = 0,
+    val focusPeakScore: Float = 0f,
+    val hyperfocalMeters: Float = 0f,
+    val liveIso: Int = 0,
+    val liveShutterNs: Long = 0L,
+    val deviceRotationDeg: Int = 0,
+    val timeLapseFrames: Int = 0,
+    val bestShotScore: Float = 0.0f,
+    val shouldShowShootNow: Boolean = false,
+    val thermalStatus: String = "none",
+    val batteryPct: Int = 100,
+    val isCharging: Boolean = false,
+    val recentThumbnailPath: String? = null,
+    val lastSavedUriString: String? = null,
+    val automationPresetId: String = "dolly_zoom",
+    val isAutomationRunning: Boolean = false,
+    val automationProgress: Float = 0f,
+    val automationDurationSec: Float = 10f,
+    val automationElapsedSec: Float = 0f,
+    val automationCountdownSec: Int = 0,
+    val statusMessage: String? = null,
+
+    // Additional Per-Mode & GCam Style Parity Fields
+    val hardwareMaxDigitalZoom: Double = 10.0,
+    val cleanViewfinderMode: Boolean = false,
+    val viewfinderDisabled: Boolean = false,
+    val gridType: String = "3x3",
+    val panoramaSweepAngle: Float = 0f,
+    val panoramaProgress: Float = 0f,
+    val isPanoramaCapturing: Boolean = false,
+    val panoramaCapturedFrames: Int = 0,
+    val is360SphereMode: Boolean = false,
+    // Spatial 180° VR Hemisphere & 360° Equirectangular Sphere Mode
+    val spatialFovDeg: Int = 180, // 180 or 360
+    val isSpatialCapturing: Boolean = false,
+    val spatialNodes: List<SpatialTargetNode> = emptyList(),
+    val spatialCapturedCount: Int = 0,
+    val spatialTotalNodes: Int = 13,
+    val spatialProgress: Float = 0f,
+    val spatialRelYawDeg: Float = 0f,
+    val spatialRelPitchDeg: Float = 0f,
+    val spatialAutoCapture: Boolean = true,
+    val perModeSettings: Map<String, ModeSettings> = emptyMap(),
+
+    // Universal Settings & System Preferences Parity (1:1 with Flutter)
+    val hapticsEnabled: Boolean = true,
+    val animationsEnabled: Boolean = true,
+    val showStorageRemaining: Boolean = true,
+    val adaptivePerformanceEnabled: Boolean = true,
+    val exifCameraInfo: Boolean = true,
+    val exifLensInfo: Boolean = true,
+    val exifExposureSettings: Boolean = true,
+    val exifDateTime: Boolean = true,
+    val exifLocation: Boolean = false,
+    val exifImageDescription: Boolean = true,
+    val exifUserComment: Boolean = true,
+    val exifColorGeometry: Boolean = true,
+    val videoCodec: String = "hevc",
+    val photoEnhanceAlgo: String = "aether_master",
+    val uncompressedAudio: Boolean = false,
+    val defaultShutterAngle: String = "180",
+    val cinemaMatteRatio: String = "off",
+    val nightFrameCount: Int = 8,
+    val nightAstroAlignment: Boolean = true,
+    val nightTone: String = "neutral",
+    val slowMoFps: Int = 120,
+    val timeLapseIntervalSec: Int = 2,
+    val automationTriggerMode: String = "timer",
+    val automationListeningLabel: String? = null,
+    val queueWorkerThreads: Int = 2,
+    val queueAutoQueueStacking: Boolean = true,
+
+    // Pro Computational & Capture Assists
+    val selfTimerSec: Int = 0,
+    val selfTimerCountdown: Int = 0,
+    val aeAfLocked: Boolean = false,
+    val lensCorrectionEnabled: Boolean = false,
+    val longExposureStyle: String = "silky_water", // "silky_water", "light_trails", "star_trails", "moving_crowd"
+    val longExposureFrames: Int = 8,
+    val focusStackEnabled: Boolean = false,
+    val focusStackSlices: Int = 5,
+    val multiExposureMode: String = "off" // "off", "additive", "average", "lighten", "darken"
+) {
+    /** Snapshot of the active mode's exposure/optics settings, for stashing on a mode switch. */
+    fun currentModeSettings(): ModeSettings = ModeSettings(
+        iso = iso,
+        shutterNs = shutterNs,
+        evStops = evStops,
+        wbKelvin = wbKelvin,
+        focusDiopters = focusDiopters,
+        zoomRatio = zoomRatio,
+        toneCurve = toneCurve,
+        filmGrain = filmGrain,
+        isProcessZero = isProcessZeroActive,
+        showProControls = showProControls
+    )
+
+    /**
+     * Production mode-switch reducer: stashes the outgoing mode's settings and restores the incoming
+     * mode's saved settings (factory defaults when the target mode has never been visited).
+     * `CommixViewModel.onModeSelected` delegates to this.
+     */
+    fun switchToMode(mode: String): CameraUiState {
+        if (activeMode == mode) return this
+        val updatedMap = perModeSettings.toMutableMap()
+        updatedMap[activeMode] = currentModeSettings()
+        val restored = updatedMap[mode]
+        return copy(
+            activeMode = mode,
+            perModeSettings = updatedMap,
+            iso = restored?.iso ?: 0,
+            shutterNs = restored?.shutterNs ?: 0L,
+            evStops = restored?.evStops ?: 0f,
+            wbKelvin = restored?.wbKelvin ?: 0,
+            focusDiopters = restored?.focusDiopters ?: -1f,
+            zoomRatio = restored?.zoomRatio ?: 1.0,
+            toneCurve = restored?.toneCurve ?: "neutral",
+            filmGrain = restored?.filmGrain ?: "off",
+            isProcessZeroActive = restored?.isProcessZero ?: false,
+            showProControls = restored?.showProControls ?: (mode == "PRO")
+        )
+    }
+
+    /**
+     * Production EXIF privacy preset. `CommixViewModel.onSetExifPreset` delegates to this:
+     * privacy mode strips GPS, image description and user comment while retaining optical metadata.
+     */
+    fun withExifPreset(privacyMode: Boolean): CameraUiState = copy(
+        exifCameraInfo = true,
+        exifLensInfo = true,
+        exifExposureSettings = true,
+        exifDateTime = true,
+        exifLocation = !privacyMode,
+        exifImageDescription = !privacyMode,
+        exifUserComment = !privacyMode,
+        exifColorGeometry = true
+    )
+
+    /** Production mapping from UI EXIF toggles to the repository's [ExifOptions] consumer. */
+    fun toExifOptions(): ExifOptions = ExifOptions(
+        cameraInfo = exifCameraInfo,
+        location = exifLocation,
+        userComment = exifUserComment,
+        lensSpecs = exifLensInfo,
+        exposureSettings = exifExposureSettings,
+        dateTime = exifDateTime,
+        imageDescription = exifImageDescription,
+        colorGeometry = exifColorGeometry
+    )
+}
+
+@Immutable
+data class ModeSettings(
+    val iso: Int = 0,
+    val shutterNs: Long = 0L,
+    val evStops: Float = 0f,
+    val wbKelvin: Int = 0,
+    val focusDiopters: Float = -1f,
+    val zoomRatio: Double = 1.0,
+    val toneCurve: String = "neutral",
+    val filmGrain: String = "off",
+    val isProcessZero: Boolean = false,
+    val showProControls: Boolean = false
+)

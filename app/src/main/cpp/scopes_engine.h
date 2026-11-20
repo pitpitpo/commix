@@ -1,0 +1,91 @@
+#pragma once
+#include <cstdint>
+#include <cstddef>
+
+namespace commix {
+
+inline constexpr int HIST_BINS = 256;
+inline constexpr int WAVE_COLS = 64;
+inline constexpr int PARADE_N = 64;
+inline constexpr int VSCOPE_SAMPLES = 256;
+
+// ---------------------------------------------------------------------------
+// Shared plane geometry.
+//
+// compute_scopes() below and the JNI bounds validator in jni_bridge.cpp must
+// agree exactly on how many bytes of a YUV_420_888 plane get touched. Both
+// sides derive their numbers from these helpers so the two cannot drift apart:
+// a validator that is narrower than the reader accepts a buffer and then walks
+// off the end of it (audit J1).
+// ---------------------------------------------------------------------------
+
+// Chroma sample counts for a plane pair. The reader clamps the last chroma row
+// and column (min(uvRow, chromaH-1) / min(uvx, chromaW-1)), so odd frame sizes
+// are read up to ceil(w/2) x ceil(h/2) samples.
+inline constexpr int chroma_width_for(int width) noexcept { return (width + 1) / 2; }
+inline constexpr int chroma_height_for(int height) noexcept { return (height + 1) / 2; }
+
+// Bytes that must be addressable in the luma plane for compute_scopes() to stay
+// in bounds: the reader walks rows y in [0, height) at yStride and columns
+// x in [0, width).
+inline constexpr size_t luma_plane_bytes(int width, int height, int yStride) noexcept {
+    if (width <= 0 || height <= 0 || yStride < width) return 0;
+    return static_cast<size_t>(height - 1) * static_cast<size_t>(yStride) + static_cast<size_t>(width);
+}
+
+// Bytes that must be addressable in ONE chroma plane (u and v have identical
+// geometry), including uvPixelStride (U/V plane layouts are not always
+// one byte per sample).
+inline constexpr size_t chroma_plane_bytes(int width, int height, int uvStride, int uvPixelStride) noexcept {
+    if (width <= 0 || height <= 0 || uvStride < 1 || uvPixelStride < 1) return 0;
+    const size_t lastRow = static_cast<size_t>(chroma_height_for(height)) - 1;
+    const size_t lastCol = static_cast<size_t>(chroma_width_for(width)) - 1;
+    return lastRow * static_cast<size_t>(uvStride) + lastCol * static_cast<size_t>(uvPixelStride) + 1;
+}
+
+// A chroma row must be able to hold a full row of samples, otherwise row n and
+// row n+1 alias each other and the scopes are computed from interleaved garbage.
+inline constexpr bool chroma_stride_holds_row(int width, int uvStride, int uvPixelStride) noexcept {
+    if (uvPixelStride < 1) return false;
+    return static_cast<size_t>(uvStride) >=
+           static_cast<size_t>(chroma_width_for(width)) * static_cast<size_t>(uvPixelStride);
+}
+
+struct ScopeOut {
+    int32_t* luma;      // [256]
+    int32_t* rBins;     // [256]
+    int32_t* gBins;     // [256]
+    int32_t* bBins;     // [256]
+    float* waveAvg;     // [64]
+    float* waveMin;     // [64]
+    float* waveMax;     // [64]
+    float* paradeR;     // [64]
+    float* paradeG;     // [64]
+    float* paradeB;     // [64]
+    float* vscope;      // [256*2] interleaved x,y normalized -1..1
+    // scalars:
+    float spotIre = 45.f;
+    float meanU = 0.f, meanV = 0.f;
+    float hiClipPct = 0.f, loClipPct = 0.f;
+    float focusPeakScore = 0.f;
+    int32_t vscopeCount = 0;
+};
+
+/**
+ * Computes all broadcast scopes from raw YUV_420_888 plane buffers.
+ * Vectorized with ARM64 NEON SIMD intrinsics where supported.
+ */
+void compute_scopes(
+    const uint8_t* __restrict__ y,
+    const uint8_t* __restrict__ u,
+    const uint8_t* __restrict__ v,
+    int width,
+    int height,
+    int yStride,
+    int uvStride,
+    int uvPixelStride,
+    int step,
+    ScopeOut& out
+) noexcept;
+
+} // namespace commix
