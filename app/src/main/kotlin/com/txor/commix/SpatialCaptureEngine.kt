@@ -271,7 +271,7 @@ object SpatialCaptureEngine {
         require(frames.isNotEmpty()) { "Cannot stitch empty spatial frame list" }
 
         val decoded = frames.mapNotNull { f ->
-            val bmp = BitmapFactory.decodeByteArray(f.jpegBytes, 0, f.jpegBytes.size)
+            val bmp = decodeSpatialTileSafe(f.jpegBytes, maxDimension = 1024)
             if (bmp != null) f to bmp else null
         }
         if (decoded.isEmpty()) {
@@ -295,6 +295,39 @@ object SpatialCaptureEngine {
             fov = fov,
             poseHeadingDeg = initialHeadingDeg
         )
+    }
+
+    /**
+     * Decodes a spatial JPEG tile using power-of-two downsampling (preventing OOM on 12MP–64MP
+     * multi-row spheres) and applies any embedded EXIF rotation so tiles always project upright.
+     */
+    private fun decodeSpatialTileSafe(jpegBytes: ByteArray, maxDimension: Int = 1024): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, bounds)
+            val srcMax = max(bounds.outWidth, bounds.outHeight)
+            if (srcMax <= 0) return null
+            var sample = 1
+            while (srcMax / (sample * 2) >= maxDimension) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            val decoded = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, opts) ?: return null
+            val exifDeg = OrientationPolicy.readExifRotationDegrees(jpegBytes)
+            if (exifDeg != 0) {
+                val matrix = Matrix().apply { postRotate(exifDeg.toFloat()) }
+                val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                if (rotated !== decoded) decoded.recycle()
+                rotated
+            } else {
+                decoded
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /**

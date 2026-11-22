@@ -1,5 +1,6 @@
 package com.txor.commix.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.background
@@ -50,7 +51,9 @@ import com.txor.commix.ui.modals.MegapixelLimitsModal
 import com.txor.commix.ui.modals.ProVideoFormatModal
 import com.txor.commix.ui.modals.MainSettingsModal
 import com.txor.commix.ui.modals.AutomationModal
+import com.txor.commix.ui.modals.StabilizationSheet
 import com.txor.commix.PipelineThroughputEngine
+import com.txor.commix.StabilizationPolicyEngine
 import com.txor.commix.ui.theme.*
 
 /**
@@ -63,6 +66,7 @@ fun CameraScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsState()
+    val panoramaPreviewStrip by viewModel.panoramaPreviewStrip.collectAsState()
     val queue = ProcessingJobQueue.instance
     val queueJobs by queue.jobs.collectAsState()
 
@@ -75,10 +79,20 @@ fun CameraScreen(
     var showKeyframeModal by remember { mutableStateOf(false) }
     var showFocusLoupe by remember { mutableStateOf(false) }
     var showMainSettings by remember { mutableStateOf(false) }
+    var settingsInitialTab by remember { mutableStateOf<String?>(null) }
     var showAutomationModal by remember { mutableStateOf(false) }
-    var cleanViewfinderMode by remember { mutableStateOf(false) }
-    val isCleanActive = cleanViewfinderMode || state.cleanViewfinderMode
+    var showStabilizationSheet by remember { mutableStateOf(false) }
+    val isCleanActive = state.cleanViewfinderMode
     var activeProTab by remember { mutableStateOf(ProControlTab.ISO) }
+
+    BackHandler(enabled = state.isPanoramaCapturing || showFocusLoupe || state.showProControls || state.cleanViewfinderMode) {
+        when {
+            state.isPanoramaCapturing -> viewModel.cancelPanoramaCapture()
+            showFocusLoupe -> showFocusLoupe = false
+            state.showProControls -> viewModel.toggleProControls()
+            state.cleanViewfinderMode -> viewModel.onToggleCleanViewfinder()
+        }
+    }
 
     // Tap to focus reticle state
     var tapFocusPoint by remember { mutableStateOf<Pair<Float, Float>?>(null) }
@@ -106,7 +120,7 @@ fun CameraScreen(
         viewModel.onCancelFocus()
     }
 
-    val modes = listOf("NIGHT", "LONG EXP", "SLOW-MO", "VIDEO", "CINEMATIC", "PHOTO", "PRO", "TIME-LAPSE", "PANORAMA", "SPATIAL", "AUTOMATION")
+    val modes = CommixModeCatalog.ALL_CAMERA_MODES
     val isVideoMode = state.activeMode in listOf("VIDEO", "CINEMATIC", "SLOW-MO", "TIME-LAPSE", "AUTOMATION")
 
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -144,14 +158,14 @@ fun CameraScreen(
                     modifier = Modifier
                         .size(32.dp)
                         .clip(CircleShape)
-                        .background(if (state.flashMode != "off") Color(0x33FFD60A) else Color(0x33000000))
+                        .background(if (state.flashMode != "off") AppleYellow.copy(alpha = 0.20f) else CinemaGlass)
                         .testTag("flash_button")
                         .clickable { viewModel.onCycleFlash() }
                 ) {
                     Icon(
                         imageVector = if (state.flashMode == "off") Icons.Default.FlashOff else Icons.Default.FlashOn,
                         contentDescription = "Flash",
-                        tint = if (state.flashMode != "off") AppleYellow else Color.White,
+                        tint = if (state.flashMode != "off") AppleYellow else CinemaTextLight,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -165,7 +179,8 @@ fun CameraScreen(
                     modifier = Modifier
                         .size(32.dp)
                         .clip(CircleShape)
-                        .background(if (hasQueueWork) Color(0x33FFD60A) else Color(0x33000000))
+                        .background(if (hasQueueWork) AppleYellow.copy(alpha = 0.20f) else CinemaGlass)
+                        .testTag("job_queue_button")
                         .clickable { showJobQueueModal = true }
                 ) {
                     if (activeJobs > 0) {
@@ -178,7 +193,7 @@ fun CameraScreen(
                         Icon(
                             imageVector = Icons.Default.Layers,
                             contentDescription = "Job Queue",
-                            tint = if (hasQueueWork) AppleYellow else Color.White,
+                            tint = if (hasQueueWork) AppleYellow else CinemaTextLight,
                             modifier = Modifier.size(16.dp)
                         )
                     }
@@ -193,10 +208,10 @@ fun CameraScreen(
                             .height(30.dp)
                             .defaultMinSize(minWidth = 32.dp)
                             .clip(RoundedCornerShape(15.dp))
-                            .background(if (timerActive) Color(0x33FFD60A) else Color(0x33000000))
+                            .background(if (timerActive) AppleYellow.copy(alpha = 0.20f) else CinemaGlass)
                             .border(
                                 0.8.dp,
-                                if (timerActive) AppleYellow else Color(0x33FFFFFF),
+                                if (timerActive) AppleYellow else CinemaGlassBorder,
                                 RoundedCornerShape(15.dp)
                             )
                             .testTag("self_timer_button")
@@ -210,7 +225,7 @@ fun CameraScreen(
                             Icon(
                                 imageVector = Icons.Default.Timer,
                                 contentDescription = "Self Timer",
-                                tint = if (timerActive) AppleYellow else Color.White,
+                                tint = if (timerActive) AppleYellow else CinemaTextLight,
                                 modifier = Modifier.size(13.dp)
                             )
                             if (timerActive) {
@@ -228,32 +243,37 @@ fun CameraScreen(
                     }
                 }
 
-                // Yellow Shield / Action Mode Badge (in Video Mode)
-                if (isVideoMode) {
-                    val isEisActive = state.eisMode != "off"
+                // Universal Hardware + Software Stabilization Shield Badge (all modes — opens StabilizationSheet)
+                run {
+                    val engineNorm = StabilizationPolicyEngine.normalizeEngineMode(state.stabilizationEngineMode)
+                    val isStabActive = engineNorm != StabilizationPolicyEngine.ENGINE_OFF
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .size(32.dp)
                             .clip(CircleShape)
-                            .background(if (isEisActive) AppleYellow else Color(0x33000000))
+                            .background(if (isStabActive) AppleYellow else CinemaGlass)
                             .border(
                                 0.8.dp,
-                                if (isEisActive) AppleYellow else Color(0x33FFFFFF),
+                                if (isStabActive) AppleYellow else CinemaGlassBorder,
                                 CircleShape
                             )
-                            .clickable { viewModel.onCycleEis() }
+                            .testTag("stabilization_shield_button")
+                            .clickable {
+                                CommixHaptics.click(context, state.hapticsEnabled)
+                                showStabilizationSheet = true
+                            }
                     ) {
                         Icon(
                             imageVector = Icons.Default.Shield,
-                            contentDescription = "Action Mode EIS",
-                            tint = if (isEisActive) Color.Black else Color.White,
+                            contentDescription = "Stabilization Settings",
+                            tint = if (isStabActive) CinemaBlack else CinemaTextLight,
                             modifier = Modifier.size(15.dp)
                         )
                     }
                 }
 
-                // Compact Thermal Warning Badge (only when thermal throttle is active, keeps top bar clean on 360dp screens)
+                // Compact Thermal Warning Badge (only when thermal throttle is active)
                 val isWarm = state.thermalStatus.lowercase() in listOf("moderate", "severe", "critical", "emergency")
                 if (isWarm) {
                     Box(
@@ -261,13 +281,13 @@ fun CameraScreen(
                         modifier = Modifier
                             .height(26.dp)
                             .clip(RoundedCornerShape(13.dp))
-                            .background(Color(0x66FF453A))
-                            .border(0.7.dp, Color(0xFFFF453A), RoundedCornerShape(13.dp))
+                            .background(RecordingRed.copy(alpha = 0.28f))
+                            .border(0.7.dp, RecordingRed, RoundedCornerShape(13.dp))
                             .padding(horizontal = 6.dp)
                     ) {
                         Text(
                             text = "HOT",
-                            color = Color(0xFFFF6961),
+                            color = RecordingRed,
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Black,
                             maxLines = 1,
@@ -446,17 +466,18 @@ fun CameraScreen(
                     modifier = Modifier
                         .size(32.dp)
                         .clip(CircleShape)
-                        .background(Color(0x33000000))
+                        .background(CinemaGlass)
                         .testTag("settings_button")
                         .clickable {
                             CommixHaptics.click(context, state.hapticsEnabled)
+                            settingsInitialTab = null
                             showMainSettings = true
                         }
                 ) {
                     Icon(
                         imageVector = Icons.Default.Settings,
                         contentDescription = "Camera Settings",
-                        tint = Color.White,
+                        tint = CinemaTextLight,
                         modifier = Modifier.size(16.dp)
                     )
                 }
@@ -557,7 +578,7 @@ fun CameraScreen(
                     CinemaMatteOverlay(ratio = matte)
                 }
 
-                // GCam-Style Panorama & 360 Degree Viewfinder Overlay
+                // Flagship Live Filmstrip Panorama & 360° Photo Sphere Overlay
                 if (state.activeMode == "PANORAMA") {
                     PanoramaGuidanceOverlay(
                         sweepAngle = state.panoramaSweepAngle,
@@ -567,7 +588,16 @@ fun CameraScreen(
                         is360Sphere = state.is360SphereMode,
                         isCapturing = state.isPanoramaCapturing,
                         capturedFrames = state.panoramaCapturedFrames,
-                        onToggle360 = { viewModel.onToggle360SphereMode() }
+                        direction = state.panoramaDirection,
+                        verticalDriftDeg = state.panoramaVerticalDriftDeg,
+                        panSpeedDegPerSec = state.panoramaSpeedDegPerSec,
+                        guidanceHint = state.panoramaGuidanceHint,
+                        guidanceSeverity = state.panoramaGuidanceSeverity,
+                        previewStrip = panoramaPreviewStrip,
+                        onToggle360 = { viewModel.onToggle360SphereMode() },
+                        onToggleDirection = { viewModel.onTogglePanoramaDirection() },
+                        onFinishStitch = { viewModel.finishPanoramaCapture() },
+                        onCancelCapture = { viewModel.cancelPanoramaCapture() }
                     )
                 }
 
@@ -611,16 +641,16 @@ fun CameraScreen(
                                 Box(
                                     modifier = Modifier
                                         .clip(RoundedCornerShape(20.dp))
-                                        .background(Color(0x33FF9500))
-                                        .border(1.2.dp, Color(0xFFFF9500), RoundedCornerShape(20.dp))
+                                        .background(CinemaAmber.copy(alpha = 0.20f))
+                                        .border(1.2.dp, CinemaAmber, RoundedCornerShape(20.dp))
                                         .padding(horizontal = 14.dp, vertical = 6.dp)
                                 ) {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.Bolt, contentDescription = null, tint = Color(0xFFFF9500), modifier = Modifier.size(14.dp))
+                                        Icon(Icons.Default.Bolt, contentDescription = null, tint = CinemaAmber, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
                                             "CINEMA BLIND VF · 100% ISP DEDICATED",
-                                            color = Color(0xFFFF9500),
+                                            color = CinemaAmber,
                                             fontSize = 11.sp,
                                             fontWeight = FontWeight.ExtraBold,
                                             letterSpacing = 0.6.sp
@@ -632,7 +662,7 @@ fun CameraScreen(
 
                                 Text(
                                     text = timeStr,
-                                    color = Color.White,
+                                    color = CinemaTextLight,
                                     fontSize = 52.sp,
                                     fontWeight = FontWeight.ExtraBold,
                                     fontFamily = FontFamily.Monospace,
@@ -663,24 +693,24 @@ fun CameraScreen(
                                     modifier = Modifier
                                         .fillMaxWidth(0.85f)
                                         .clip(RoundedCornerShape(10.dp))
-                                        .background(Color(0x22FFFFFF))
-                                        .border(0.8.dp, Color(0x22FFFFFF), RoundedCornerShape(10.dp))
+                                        .background(CinemaSurface)
+                                        .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(10.dp))
                                         .padding(horizontal = 14.dp, vertical = 10.dp)
                                 ) {
-                                    Text("AUDIO", color = Color.Gray, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                    Text("AUDIO", color = CinemaTextDim, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                                     Spacer(modifier = Modifier.width(10.dp))
                                     Box(
                                         modifier = Modifier
                                             .weight(1f)
                                             .height(8.dp)
                                             .clip(RoundedCornerShape(3.dp))
-                                            .background(Color(0x22FFFFFF))
+                                            .background(CinemaSurfaceElevated)
                                     ) {
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxWidth(state.audioNorm.coerceIn(0.01f, 1f))
                                                 .fillMaxHeight()
-                                                .background(if (state.audioNorm > 0.85f) Color(0xFFFF3B30) else Color(0xFF34C759))
+                                                .background(if (state.audioNorm > 0.85f) RecordingRed else CinemaGreen)
                                         )
                                     }
                                     Spacer(modifier = Modifier.width(8.dp))
@@ -926,7 +956,7 @@ fun CameraScreen(
                     }
                 }
 
-                // Scopes, Multi-Grid Guides, RGB Parade, Center Reticle, and Vectorscope
+                // Scopes, Multi-Grid Guides, False Color, Zebras, Safe-Area, RGB Parade, Center Reticle, and Vectorscope
                 ScopesOverlay(
                     showWaveform = state.showWaveform,
                     showHistogram = state.showHistogram,
@@ -935,6 +965,13 @@ fun CameraScreen(
                     showGrid = state.showGrid,
                     gridType = state.gridType,
                     showVectorscope = state.showVectorscope || state.showScopes,
+                    showZebras = state.showZebras,
+                    zebraThresholdIre = state.zebraThresholdIre,
+                    showFalseColor = state.showFalseColor,
+                    showSafeAreaGuides = state.showSafeAreaGuides,
+                    lumaGrid = state.lumaGrid,
+                    lumaGridW = state.lumaGridW,
+                    lumaGridH = state.lumaGridH,
                     rollDeg = state.rollDeg,
                     pitchDeg = state.pitchDeg,
                     waveformCols = state.waveformCols,
@@ -969,12 +1006,12 @@ fun CameraScreen(
                             .horizontalScroll(rememberScrollState())
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
-                        Text("ISO $liveIsoDisp", color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
-                        Text(shutterStr, color = Color.White, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
+                        Text("ISO $liveIsoDisp", color = CinemaTextLight, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
+                        Text(shutterStr, color = CinemaTextLight, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
                         Text("IRE ${state.spotIre.toInt()}", color = AppleYellow, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
-                        Text("PK $peakPct%", color = if (peakPct > 25) Color(0xFF34C759) else Color.Gray, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
+                        Text("PK $peakPct%", color = if (peakPct > 25) CinemaGreen else CinemaTextDim, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
                         if (hfStr.isNotEmpty()) {
-                            Text(hfStr, color = Color(0xFF64D2FF), fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
+                            Text(hfStr, color = CinemaCyan, fontSize = 9.5.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace, maxLines = 1, softWrap = false)
                         }
                         Box(
                             modifier = Modifier
@@ -1069,10 +1106,15 @@ fun CameraScreen(
                     )
                 }
 
-                // Interactive Focus Loupe
+                // Interactive Focus Loupe (live zoom magnification + manual diopter stepper)
                 if (showFocusLoupe) {
                     FocusLoupe(
                         currentFocusDiopters = state.focusDiopters,
+                        focusPeakScore = state.focusPeakScore,
+                        currentZoomRatio = state.zoomRatio,
+                        onStepFocus = { viewModel.onStepFocusDiopters(it) },
+                        onSetFocus = { viewModel.onFocusChanged(it) },
+                        onMagnificationChanged = { viewModel.onZoomChanged(it) },
                         onClose = { showFocusLoupe = false },
                         modifier = Modifier
                             .align(Alignment.TopEnd)
@@ -1115,12 +1157,12 @@ fun CameraScreen(
                         .align(Alignment.TopStart)
                         .padding(start = 14.dp, top = 14.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x99000000))
-                        .border(0.7.dp, Color(0x40FFFFFF), RoundedCornerShape(12.dp))
+                        .background(CinemaGlass)
+                        .border(0.7.dp, CinemaGlassBorder, RoundedCornerShape(12.dp))
+                        .testTag("clean_view_pill")
                         .clickable {
-                            val next = !isCleanActive
-                            cleanViewfinderMode = next
-                            if (state.cleanViewfinderMode != next) viewModel.onToggleCleanViewfinder()
+                            CommixHaptics.click(context, state.hapticsEnabled)
+                            viewModel.onToggleCleanViewfinder()
                         }
                         .padding(horizontal = 10.dp, vertical = 4.dp)
                 ) {
@@ -1137,7 +1179,7 @@ fun CameraScreen(
                         Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = if (isCleanActive) "CLEAN VIEW (TAP TO EXIT)" else "CLEAN VIEW",
-                            color = Color.White,
+                            color = CinemaTextLight,
                             fontSize = 9.5.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 0.6.sp
@@ -1216,8 +1258,9 @@ fun CameraScreen(
                 // ---------------------------------------------------------
                 // Floating Universal Multi-Lens Selector Pill
                 // Dynamically renders every discovered physical/logical sensor on any phone
+                // Hidden during active Panorama/Spatial sweeps to keep viewfinder focused
                 // ---------------------------------------------------------
-                if (!isCleanActive) {
+                if (!isCleanActive && !state.isPanoramaCapturing && !state.isSpatialCapturing) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -1352,7 +1395,7 @@ fun CameraScreen(
                                 modifier = Modifier
                                     .padding(start = 4.dp, end = 2.dp)
                                     .clip(RoundedCornerShape(16.dp))
-                                    .background(Color(0x26FFD60A))
+                                    .background(AppleYellow.copy(alpha = 0.16f))
                                     .border(0.8.dp, AppleYellow.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
                                     .testTag("lens_modal_button")
                                     .clickable {
@@ -1463,6 +1506,27 @@ fun CameraScreen(
                     onToggleHorizon = { viewModel.toggleHorizon() },
                     showGrid = state.showGrid,
                     onToggleGrid = { viewModel.toggleGrid() },
+                    showZebras = state.showZebras,
+                    zebraThresholdIre = state.zebraThresholdIre,
+                    onToggleZebras = { viewModel.onToggleZebras() },
+                    onCycleZebraThreshold = { viewModel.onCycleZebraThreshold() },
+                    showFalseColor = state.showFalseColor,
+                    onToggleFalseColor = { viewModel.onToggleFalseColor() },
+                    showSafeAreaGuides = state.showSafeAreaGuides,
+                    onToggleSafeAreaGuides = { viewModel.onToggleSafeAreaGuides() },
+                    focusPointA = state.focusPointA,
+                    focusPointB = state.focusPointB,
+                    focusPullDurationSec = state.focusPullDurationSec,
+                    isFocusPullRunning = state.isFocusPullRunning,
+                    onSetFocusPointA = { viewModel.onSetFocusPointA() },
+                    onSetFocusPointB = { viewModel.onSetFocusPointB() },
+                    onClearFocusPullPoints = { viewModel.onClearFocusPullPoints() },
+                    onSetFocusPullDuration = { viewModel.onSetFocusPullDuration(it) },
+                    onTriggerFocusPull = { viewModel.onTriggerFocusPull(it) },
+                    savedCustomSlots = state.savedCustomSlots,
+                    activeCustomSlot = state.activeCustomSlot,
+                    onSaveCustomPreset = { viewModel.onSaveCustomPreset(it) },
+                    onLoadCustomPreset = { viewModel.onLoadCustomPreset(it) },
                     aeAfLocked = state.aeAfLocked,
                     onToggleAeAfLock = { viewModel.onToggleAeAfLock() },
                     lensCorrectionEnabled = state.lensCorrectionEnabled,
@@ -1498,7 +1562,7 @@ fun CameraScreen(
                 )
             }
 
-            // Mode-Specific Dedicated Pro Control Strip (all 10 modes)
+            // Mode-Specific Dedicated Pro Control Strip (all 11 modes)
             if (!isCleanActive && !state.isRecording) {
                 ModeContextControlBar(
                     state = state,
@@ -1511,11 +1575,16 @@ fun CameraScreen(
                     onOpenSlateSheet = { showSlateSheet = true },
                     onOpenAutomationModal = { showAutomationModal = true },
                     onOpenKeyframeModal = { showKeyframeModal = true },
+                    onOpenSettingsTab = { tab ->
+                        settingsInitialTab = tab
+                        showMainSettings = true
+                    },
+                    onOpenStabilizationSheet = { showStabilizationSheet = true },
                     modifier = Modifier.padding(bottom = 6.dp)
                 )
             }
 
-            // Horizontal Pill Mode Carousel (NIGHT, SLOW-MO, VIDEO, CINEMATIC, PHOTO, PRO...)
+            // Horizontal Pill Mode Carousel (all 11 modes)
             ModeCarousel(
                 modes = modes,
                 activeMode = state.activeMode,
@@ -1539,8 +1608,9 @@ fun CameraScreen(
                     modifier = Modifier
                         .size(50.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0x1EFFFFFF))
+                        .background(CinemaSurface)
                         .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(12.dp))
+                        .testTag("gallery_button")
                         .clickable {
                             CommixHaptics.click(context, state.hapticsEnabled)
                             viewModel.openGallery(context)
@@ -1549,7 +1619,7 @@ fun CameraScreen(
                     Icon(
                         imageVector = Icons.Default.Collections,
                         contentDescription = "Gallery",
-                        tint = Color.White,
+                        tint = CinemaTextLight,
                         modifier = Modifier.size(23.dp)
                     )
                     if (state.lastSavedUriString != null) {
@@ -1559,7 +1629,7 @@ fun CameraScreen(
                                 .padding(5.dp)
                                 .size(8.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFF34C759))
+                                .background(CinemaGreen)
                         )
                     }
                 }
@@ -1744,7 +1814,11 @@ fun CameraScreen(
             MainSettingsModal(
                 state = state,
                 viewModel = viewModel,
-                onDismiss = { showMainSettings = false }
+                initialTab = settingsInitialTab,
+                onDismiss = {
+                    showMainSettings = false
+                    settingsInitialTab = null
+                }
             )
         }
 
@@ -1755,6 +1829,9 @@ fun CameraScreen(
                 maxZoom = state.maxZoomRatio,
                 onSelectPreset = { presetId ->
                     viewModel.onSelectAutomationPreset(presetId)
+                },
+                onSelectTrigger = { trigger ->
+                    viewModel.onSetAutomationTrigger(trigger)
                 },
                 onStartPreset = { presetId, trigger ->
                     viewModel.onSelectAutomationPreset(presetId)
@@ -1770,6 +1847,22 @@ fun CameraScreen(
                 onDismiss = { showAutomationModal = false }
             )
         }
+        if (showStabilizationSheet) {
+            StabilizationSheet(
+                state = state,
+                viewModel = viewModel,
+                onDismiss = { showStabilizationSheet = false }
+            )
+        }
+    }
+
+    // Astrophotography Dark-Adaptation Red Vision HUD Tint (touch-passthrough)
+    if (state.activeMode == "NIGHT" && state.nightRedUiEnabled) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(RecordingRed.copy(alpha = 0.16f))
+        )
     }
 
     // Floating status toast pill

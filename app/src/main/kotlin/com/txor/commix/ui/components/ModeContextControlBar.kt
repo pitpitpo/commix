@@ -21,6 +21,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.txor.commix.StabilizationPolicyEngine
 import com.txor.commix.model.CameraUiState
 import com.txor.commix.ui.CommixViewModel
 import com.txor.commix.ui.theme.*
@@ -28,8 +29,10 @@ import java.util.Locale
 
 /**
  * Dedicated per-mode contextual control strip rendered above the mode carousel.
- * Gives every single camera mode instant, 1-tap access to its real end-to-end engine parameters
- * without hunting through nested menus.
+ * Gives every single camera mode instant, 1-tap access to its real end-to-end engine parameters,
+ * including unified Hardware+Software Stabilization & Apply-When controls, Burst, Auto-Level,
+ * Zebras, False Color, Safe Area, Focus Pull A->B, Custom Rig Presets C1-C3, Slow-Mo Playback FPS,
+ * Time-Lapse Shot Limit & Output Duration, and Night Red Vision UI.
  */
 @Composable
 fun ModeContextControlBar(
@@ -40,8 +43,27 @@ fun ModeContextControlBar(
     onOpenSlateSheet: () -> Unit,
     onOpenAutomationModal: () -> Unit,
     onOpenKeyframeModal: () -> Unit,
+    onOpenSettingsTab: (String) -> Unit = {},
+    onOpenStabilizationSheet: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val stabEngine = StabilizationPolicyEngine.normalizeEngineMode(state.stabilizationEngineMode)
+    val stabWhen = StabilizationPolicyEngine.normalizeApplyWhen(state.stabilizationApplyWhen)
+    val stabEngineShort = when (stabEngine) {
+        StabilizationPolicyEngine.ENGINE_OFF -> "OFF"
+        StabilizationPolicyEngine.ENGINE_HARDWARE_OIS -> "OIS"
+        StabilizationPolicyEngine.ENGINE_SOFTWARE_EIS -> "EIS"
+        StabilizationPolicyEngine.ENGINE_GYRO_POST -> "GYRO"
+        else -> "HYB"
+    }
+    val stabWhenShort = when (stabWhen) {
+        StabilizationPolicyEngine.APPLY_RECORDING_ONLY -> "REC"
+        StabilizationPolicyEngine.APPLY_PREVIEW_ONLY -> "VF"
+        StabilizationPolicyEngine.APPLY_POST_EXPORT -> "POST"
+        else -> "ALL"
+    }
+    val stabIsActive = stabEngine != StabilizationPolicyEngine.ENGINE_OFF
+
     LazyRow(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
         contentPadding = PaddingValues(horizontal = 14.dp),
@@ -53,6 +75,35 @@ fun ModeContextControlBar(
     ) {
         when (state.activeMode) {
             "PHOTO" -> {
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.BurstMode,
+                        label = if (state.burstShotCount >= 2) "BURST ${state.burstShotCount}×" else "BURST OFF",
+                        isActive = state.burstShotCount >= 2,
+                        accentColor = CinemaAmber,
+                        monospace = true,
+                        onClick = { viewModel.onCycleBurstShotCount() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Straighten,
+                        label = if (state.photoAutoLevelEnabled) "AUTO-LVL ON" else "AUTO-LVL",
+                        isActive = state.photoAutoLevelEnabled,
+                        accentColor = CinemaCyan,
+                        onClick = { viewModel.onTogglePhotoAutoLevel() }
+                    )
+                }
                 item {
                     ContextChip(
                         icon = if (state.isProcessZeroActive) Icons.Default.Grain else Icons.Default.AutoAwesome,
@@ -163,19 +214,50 @@ fun ModeContextControlBar(
                 }
                 item {
                     ContextChip(
+                        icon = Icons.Default.Bookmark,
+                        label = if (state.activeCustomSlot > 0) "C${state.activeCustomSlot}" else "C1-C3",
+                        isActive = state.activeCustomSlot > 0 || state.savedCustomSlots.isNotEmpty(),
+                        accentColor = CinemaCyan,
+                        monospace = true,
+                        onClick = { onOpenProTab(ProControlTab.PRESETS) }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Gradient,
+                        label = if (state.showZebras) "ZEBRA ${state.zebraThresholdIre}%" else "ZEBRA",
+                        isActive = state.showZebras,
+                        accentColor = RecordingRed,
+                        monospace = true,
+                        onClick = { viewModel.onToggleZebras() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.ColorLens,
+                        label = "F-COLOR",
+                        isActive = state.showFalseColor,
+                        accentColor = CinemaPurple,
+                        onClick = { viewModel.onToggleFalseColor() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
                         icon = Icons.Default.Lock,
                         label = if (state.aeAfLocked) "LOCKED" else "AE/AF",
                         isActive = state.aeAfLocked,
                         accentColor = CinemaAmber,
                         onClick = { viewModel.onToggleAeAfLock() }
-                    )
-                }
-                item {
-                    ContextChip(
-                        label = if (state.isProcessZeroActive) "P0 ON" else "P0",
-                        isActive = state.isProcessZeroActive,
-                        accentColor = CinemaCyan,
-                        onClick = { viewModel.onToggleProcessZero() }
                     )
                 }
                 item {
@@ -222,9 +304,39 @@ fun ModeContextControlBar(
                 item {
                     ContextChip(
                         icon = Icons.Default.Shield,
-                        label = "EIS ${state.eisMode.replace("_", " ").uppercase()}",
-                        isActive = state.eisMode != "off",
-                        onClick = { viewModel.onCycleEis() }
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Gradient,
+                        label = if (state.showZebras) "ZEBRA ${state.zebraThresholdIre}%" else "ZEBRA",
+                        isActive = state.showZebras,
+                        accentColor = RecordingRed,
+                        monospace = true,
+                        onClick = { viewModel.onToggleZebras() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.ColorLens,
+                        label = "F-COLOR",
+                        isActive = state.showFalseColor,
+                        accentColor = CinemaPurple,
+                        onClick = { viewModel.onToggleFalseColor() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.CropFree,
+                        label = "SAFE AREA",
+                        isActive = state.showSafeAreaGuides,
+                        accentColor = CinemaCyan,
+                        onClick = { viewModel.onToggleSafeAreaGuides() }
                     )
                 }
                 item {
@@ -275,11 +387,56 @@ fun ModeContextControlBar(
                     )
                 }
                 item {
+                    val pullReady = state.focusPointA != null && state.focusPointB != null
+                    ContextChip(
+                        icon = Icons.Default.CenterFocusWeak,
+                        label = when {
+                            state.isFocusPullRunning -> "PULLING…"
+                            pullReady -> "PULL A→B"
+                            else -> "FOCUS A/B"
+                        },
+                        isActive = pullReady || state.isFocusPullRunning,
+                        accentColor = CinemaCyan,
+                        onClick = {
+                            if (pullReady) viewModel.onTriggerFocusPull(true)
+                            else onOpenProTab(ProControlTab.FOCUS)
+                        }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
                     ContextChip(
                         icon = Icons.Default.Palette,
                         label = if (state.toneCurve != "neutral") state.toneCurve.replace("_", " ").uppercase() else "LOG / CURVE",
                         isActive = state.toneCurve != "neutral",
                         onClick = { onOpenProTab(ProControlTab.CURVE) }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.ColorLens,
+                        label = "F-COLOR",
+                        isActive = state.showFalseColor,
+                        accentColor = CinemaPurple,
+                        onClick = { viewModel.onToggleFalseColor() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.CropFree,
+                        label = "SAFE AREA",
+                        isActive = state.showSafeAreaGuides,
+                        accentColor = CinemaCyan,
+                        onClick = { viewModel.onToggleSafeAreaGuides() }
                     )
                 }
                 item {
@@ -318,6 +475,25 @@ fun ModeContextControlBar(
                         isActive = state.nightAstroAlignment,
                         accentColor = CinemaCyan,
                         onClick = { viewModel.onToggleNightAstro() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Visibility,
+                        label = if (state.nightRedUiEnabled) "RED UI ON" else "RED UI",
+                        isActive = state.nightRedUiEnabled,
+                        accentColor = RecordingRed,
+                        onClick = { viewModel.onToggleNightRedUi() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort" else "TRIPOD OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
                     )
                 }
                 item {
@@ -375,6 +551,25 @@ fun ModeContextControlBar(
                 }
                 item {
                     ContextChip(
+                        icon = Icons.Default.Straighten,
+                        label = if (state.photoAutoLevelEnabled) "AUTO-LVL ON" else "AUTO-LVL",
+                        isActive = state.photoAutoLevelEnabled,
+                        accentColor = CinemaCyan,
+                        onClick = { viewModel.onTogglePhotoAutoLevel() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort" else "TRIPOD OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
                         icon = Icons.Default.Lock,
                         label = if (state.aeAfLocked) "LOCKED" else "TRIPOD",
                         isActive = state.aeAfLocked,
@@ -394,13 +589,38 @@ fun ModeContextControlBar(
                     )
                 }
                 item {
-                    val dilation = (state.slowMoFps.toDouble() / 30.0).coerceAtLeast(1.0)
                     ContextChip(
-                        label = String.format(Locale.US, "1/%.0f× SPEED", dilation),
+                        icon = Icons.Default.PlayArrow,
+                        label = "PLAY ${state.slowMoPlaybackFps}p",
+                        isActive = true,
+                        accentColor = AppleYellow,
+                        monospace = true,
+                        onClick = { viewModel.onCycleSlowMoPlaybackFps() }
+                    )
+                }
+                item {
+                    val dilation = (state.slowMoFps.toDouble() / state.slowMoPlaybackFps.coerceAtLeast(1).toDouble()).coerceAtLeast(1.0)
+                    val speedStr = if (dilation % 1.0 < 0.05) {
+                        String.format(Locale.US, "1/%.0f× SPEED", dilation)
+                    } else {
+                        String.format(Locale.US, "1/%.1f× SPEED", dilation)
+                    }
+                    ContextChip(
+                        label = speedStr,
                         isActive = true,
                         accentColor = CinemaCyan,
                         monospace = true,
                         onClick = { viewModel.onCycleSlowMoFps() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
                     )
                 }
                 item {
@@ -432,12 +652,40 @@ fun ModeContextControlBar(
                     )
                 }
                 item {
+                    val limitLabel = if (state.timeLapseShotLimit > 0) {
+                        val outSec = state.timeLapseShotLimit / 30.0
+                        String.format(Locale.US, "LIMIT %d (%.0fs)", state.timeLapseShotLimit, outSec)
+                    } else {
+                        "LIMIT ∞"
+                    }
                     ContextChip(
-                        label = "${state.timeLapseFrames} FRAMES",
+                        icon = Icons.Default.Flag,
+                        label = limitLabel,
+                        isActive = state.timeLapseShotLimit > 0,
+                        accentColor = CinemaCyan,
+                        monospace = true,
+                        onClick = { viewModel.onCycleTimeLapseShotLimit() }
+                    )
+                }
+                item {
+                    val clipSec = state.timeLapseFrames / 30.0
+                    val frameLabel = if (state.timeLapseFrames > 0) {
+                        String.format(Locale.US, "%dF (%.1fs)", state.timeLapseFrames, clipSec)
+                    } else {
+                        "0 FRAMES"
+                    }
+                    ContextChip(
+                        label = frameLabel,
                         isActive = state.timeLapseFrames > 0,
                         accentColor = CinemaGreen,
                         monospace = true,
-                        onClick = {}
+                        onClick = {
+                            if (state.isRecording) {
+                                viewModel.onShutterTapped()
+                            } else {
+                                onOpenSettingsTab("TIME-LAPSE")
+                            }
+                        }
                     )
                 }
                 item {
@@ -447,6 +695,16 @@ fun ModeContextControlBar(
                         isActive = state.aeAfLocked,
                         accentColor = CinemaAmber,
                         onClick = { viewModel.onToggleAeAfLock() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort" else "TRIPOD OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
                     )
                 }
                 item {
@@ -470,9 +728,18 @@ fun ModeContextControlBar(
                 }
                 item {
                     ContextChip(
+                        icon = Icons.Default.SwapHoriz,
+                        label = if (state.panoramaDirection >= 0) "DIR L→R" else "DIR R←L",
+                        isActive = true,
+                        accentColor = CinemaTextLight,
+                        onClick = { viewModel.onTogglePanoramaDirection() }
+                    )
+                }
+                item {
+                    ContextChip(
                         icon = Icons.Default.Lock,
-                        label = if (state.aeAfLocked) "EXP LOCKED" else "LOCK EXP",
-                        isActive = state.aeAfLocked,
+                        label = if (state.aeAfLocked || state.isPanoramaCapturing) "EXP LOCKED" else "LOCK EXP",
+                        isActive = state.aeAfLocked || state.isPanoramaCapturing,
                         onClick = { viewModel.onToggleAeAfLock() }
                     )
                 }
@@ -486,10 +753,30 @@ fun ModeContextControlBar(
                 }
                 item {
                     ContextChip(
-                        label = "${state.panoramaCapturedFrames} SLICES",
+                        icon = Icons.Default.Shield,
+                        label = "STAB SWEEP-SAFE",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
+                        label = if (state.isPanoramaCapturing && state.panoramaCapturedFrames > 0) {
+                            "DONE (${state.panoramaCapturedFrames})"
+                        } else {
+                            "${state.panoramaCapturedFrames} SLICES"
+                        },
                         isActive = state.panoramaCapturedFrames > 0,
+                        accentColor = CinemaGreen,
                         monospace = true,
-                        onClick = {}
+                        onClick = {
+                            if (state.isPanoramaCapturing && state.panoramaCapturedFrames > 0) {
+                                viewModel.finishPanoramaCapture()
+                            } else {
+                                onOpenSettingsTab("PANORAMA")
+                            }
+                        }
                     )
                 }
             }
@@ -532,6 +819,15 @@ fun ModeContextControlBar(
                 }
                 item {
                     ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = "STAB SWEEP-SAFE",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        onClick = onOpenStabilizationSheet
+                    )
+                }
+                item {
+                    ContextChip(
                         label = "${state.spatialCapturedCount}/${state.spatialTotalNodes} NODES",
                         isActive = state.spatialCapturedCount > 0,
                         accentColor = CinemaGreen,
@@ -539,6 +835,8 @@ fun ModeContextControlBar(
                         onClick = {
                             if (state.isSpatialCapturing && state.spatialCapturedCount > 0) {
                                 viewModel.finishSpatialCapture()
+                            } else {
+                                onOpenSettingsTab("SPATIAL")
                             }
                         }
                     )
@@ -556,10 +854,11 @@ fun ModeContextControlBar(
                     )
                 }
                 item {
+                    val normTrigger = CommixModeCatalog.normalizeAutomationTrigger(state.automationTriggerMode)
                     ContextChip(
                         icon = Icons.Default.Sensors,
-                        label = "TRIG: ${state.automationTriggerMode.replace("_", " ").uppercase()}",
-                        isActive = state.automationTriggerMode != "immediate",
+                        label = "TRIG: ${CommixModeCatalog.formatAutomationTriggerShort(normTrigger)}",
+                        isActive = normTrigger != "instant",
                         accentColor = CinemaCyan,
                         onClick = { viewModel.onCycleAutomationTrigger() }
                     )
@@ -570,6 +869,16 @@ fun ModeContextControlBar(
                         label = "KEYFRAMES",
                         isActive = false,
                         onClick = { onOpenKeyframeModal() }
+                    )
+                }
+                item {
+                    ContextChip(
+                        icon = Icons.Default.Shield,
+                        label = if (stabIsActive) "STAB $stabEngineShort·$stabWhenShort" else "STAB OFF",
+                        isActive = stabIsActive,
+                        accentColor = CinemaGreen,
+                        monospace = true,
+                        onClick = onOpenStabilizationSheet
                     )
                 }
                 item {

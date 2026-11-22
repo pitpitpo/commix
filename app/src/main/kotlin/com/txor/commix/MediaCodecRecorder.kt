@@ -8,6 +8,7 @@ import android.view.Surface
 import android.util.Log
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * High-performance MediaCodec surface video and synchronized AAC audio encoder.
@@ -66,6 +67,60 @@ class MediaCodecRecorder(
          * Determine if the encoder configuration corresponds to All-I (Intra-only, every frame is an IDR keyframe).
          */
         fun isAllIProfile(iFrameIntervalSeconds: Float): Boolean = iFrameIntervalSeconds <= 0.0f
+
+        /**
+         * Writes [shortCount] PCM16 samples starting at [shortOffset] into [dst] in explicit
+         * LITTLE_ENDIAN byte order as required by Android's AAC MediaCodec encoder.
+         * Returns the number of bytes written.
+         */
+        fun writePcm16LittleEndian(
+            pcmData: ShortArray,
+            shortOffset: Int,
+            shortCount: Int,
+            dst: ByteBuffer
+        ): Int {
+            dst.clear()
+            dst.order(ByteOrder.LITTLE_ENDIAN)
+            val safeOffset = shortOffset.coerceAtLeast(0)
+            val availableSrc = (pcmData.size - safeOffset).coerceAtLeast(0)
+            val requested = shortCount.coerceIn(0, availableSrc)
+            val maxDstShorts = dst.remaining() / 2
+            val shortsToWrite = minOf(requested, maxDstShorts)
+            for (i in 0 until shortsToWrite) {
+                dst.putShort(pcmData[safeOffset + i])
+            }
+            return shortsToWrite * 2
+        }
+
+        /**
+         * Normalizes raw Camera2 hardware presentation timestamps (typically device uptime in µs)
+         * to a 0-based timeline matching the AAC audio track origin while enforcing strict
+         * monotonicity required by MediaMuxer.
+         */
+        fun normalizeHardwarePtsUs(
+            rawPtsUs: Long,
+            firstHardwarePtsUs: Long,
+            lastMuxerPtsUs: Long
+        ): Long {
+            val relative = (rawPtsUs - firstHardwarePtsUs).coerceAtLeast(0L)
+            return if (lastMuxerPtsUs >= 0L && relative <= lastMuxerPtsUs) {
+                lastMuxerPtsUs + 1000L
+            } else {
+                relative
+            }
+        }
+
+        /**
+         * Computes 16-pixel-aligned 1080p fallback dimensions preserving both landscape and portrait aspect ratios.
+         */
+        fun compute1080pFallbackSize(srcWidth: Int, srcHeight: Int): Pair<Int, Int> {
+            val safeW = srcWidth.coerceAtLeast(16)
+            val safeH = srcHeight.coerceAtLeast(16)
+            val aspect = safeW.toDouble() / safeH.toDouble()
+            val w = if (aspect >= 1.0) 1920 else (((1920.0 * aspect).toInt() / 16) * 16).coerceAtLeast(16)
+            val h = if (aspect >= 1.0) (((1920.0 / aspect).toInt() / 16) * 16).coerceAtLeast(16) else 1920
+            return w to h
+        }
     }
 
     private var encoder: MediaCodec? = null
@@ -73,7 +128,7 @@ class MediaCodecRecorder(
     private var mediaMuxer: MediaMuxer? = null
     private var videoTrackIndex: Int = -1
     private var audioTrackIndex: Int = -1
-    private var isMuxerStarted: Boolean = false
+    @Volatile private var isMuxerStarted: Boolean = false
     private val muxerLock = Any()
 
     @Volatile private var isRecording: Boolean = false
@@ -228,9 +283,7 @@ class MediaCodecRecorder(
             if (enc == null) {
                 try {
                     Log.i("MediaCodecRecorder", "Attempting standard 1080p fallback.")
-                    val aspect = encWidth.toDouble() / encHeight.toDouble()
-                    val fallbackW = if (aspect >= 1.0) 1920 else (((1080.0 * aspect).toInt() / 16) * 16)
-                    val fallbackH = if (aspect >= 1.0) (((1920.0 / aspect).toInt() / 16) * 16) else 1920
+                    val (fallbackW, fallbackH) = compute1080pFallbackSize(encWidth, encHeight)
                     encWidth = fallbackW
                     encHeight = fallbackH
                     format = buildFormat(mimeType, encWidth, encHeight, enableHdr10 = false)
@@ -299,25 +352,26 @@ class MediaCodecRecorder(
     }
 
     private fun enqueueAudioFrame(pcmData: ShortArray, length: Int, rate: Int) {
-        if (!isRecording || isEosSignaled) return
+        if (!isRecording || isEosSignaled || length <= 0) return
         val enc = audioEncoder ?: return
+        val effectiveRate = if (rate > 0) rate else audioSampleRate
+        var offsetShorts = 0
         try {
-            val inIdx = enc.dequeueInputBuffer(5000L) // 5ms timeout
-            if (inIdx >= 0) {
-                val inBuf = enc.getInputBuffer(inIdx)
-                if (inBuf != null) {
-                    inBuf.clear()
-                    val byteCount = length * 2
-                    val bytesToWrite = minOf(byteCount, inBuf.remaining())
-                    val shortsToWrite = bytesToWrite / 2
-                    for (i in 0 until shortsToWrite) {
-                        inBuf.putShort(pcmData[i])
-                    }
-                    val effectiveRate = if (rate > 0) rate else audioSampleRate
-                    val ptsUs = (audioSampleCount * 1_000_000L) / effectiveRate
-                    audioSampleCount += shortsToWrite
-                    enc.queueInputBuffer(inIdx, 0, bytesToWrite, ptsUs, 0)
+            while (offsetShorts < length && isRecording && !isEosSignaled) {
+                val inIdx = enc.dequeueInputBuffer(5000L) // 5ms timeout
+                if (inIdx < 0) break
+                val inBuf = enc.getInputBuffer(inIdx) ?: break
+                val remainingShorts = length - offsetShorts
+                val bytesWritten = writePcm16LittleEndian(pcmData, offsetShorts, remainingShorts, inBuf)
+                val shortsWritten = bytesWritten / 2
+                if (shortsWritten <= 0) {
+                    enc.queueInputBuffer(inIdx, 0, 0, (audioSampleCount * 1_000_000L) / effectiveRate, 0)
+                    break
                 }
+                val ptsUs = (audioSampleCount * 1_000_000L) / effectiveRate
+                audioSampleCount += shortsWritten
+                offsetShorts += shortsWritten
+                enc.queueInputBuffer(inIdx, 0, bytesWritten, ptsUs, 0)
             }
         } catch (_: Exception) {}
     }
@@ -386,6 +440,7 @@ class MediaCodecRecorder(
             var eosReceived = false
             var frameIndex = 0L
             val pacingFps = if (isSlowMotion) playbackFps else targetFps
+            var firstHardwarePtsUs = -1L
             var lastMuxerPtsUs = -1L
 
             // Adaptive dequeue timeout: 2.5ms for high frame rates (>=60fps) to prevent surface buffer starvation
@@ -417,18 +472,26 @@ class MediaCodecRecorder(
                 } else if (outIdx >= 0) {
                     val outBuf = enc.getOutputBuffer(outIdx)
                     if (outBuf != null && bufferInfo.size > 0) {
-                        if (isSlowMotion || useSyntheticPts) {
-                            // Drift-free synthetic presentation timestamp
-                            val pts = computeDriftFreePtsUs(frameIndex, pacingFps)
-                            bufferInfo.presentationTimeUs = if (pts <= lastMuxerPtsUs) lastMuxerPtsUs + 1L else pts
-                            frameIndex++
-                        } else {
-                            // Ensure strictly monotonic presentation timestamps for hardware Camera2 timestamps
-                            if (bufferInfo.presentationTimeUs <= lastMuxerPtsUs) {
-                                bufferInfo.presentationTimeUs = lastMuxerPtsUs + 1000L
+                        val isCodecConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        if (!isCodecConfig) {
+                            if (isSlowMotion || useSyntheticPts) {
+                                // Drift-free synthetic presentation timestamp for slow-mo & time-lapse
+                                val pts = computeDriftFreePtsUs(frameIndex, pacingFps)
+                                bufferInfo.presentationTimeUs = if (pts <= lastMuxerPtsUs) lastMuxerPtsUs + 1L else pts
+                                frameIndex++
+                            } else {
+                                // Normalize Camera2 hardware uptime PTS to 0-based origin matching AAC audio
+                                if (firstHardwarePtsUs < 0L) {
+                                    firstHardwarePtsUs = bufferInfo.presentationTimeUs
+                                }
+                                bufferInfo.presentationTimeUs = normalizeHardwarePtsUs(
+                                    rawPtsUs = bufferInfo.presentationTimeUs,
+                                    firstHardwarePtsUs = firstHardwarePtsUs,
+                                    lastMuxerPtsUs = lastMuxerPtsUs
+                                )
                             }
+                            lastMuxerPtsUs = bufferInfo.presentationTimeUs
                         }
-                        lastMuxerPtsUs = bufferInfo.presentationTimeUs
 
                         // If muxer hasn't started yet because audio track format is pending, wait briefly
                         if (!isMuxerStarted) {

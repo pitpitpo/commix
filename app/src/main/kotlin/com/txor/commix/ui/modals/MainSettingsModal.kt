@@ -24,110 +24,70 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.txor.commix.PhotoFormatEngine
+import com.txor.commix.StabilizationPolicyEngine
 import com.txor.commix.model.CameraUiState
 import com.txor.commix.ui.CommixViewModel
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaGreen
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.*
+import com.txor.commix.ui.theme.*
 import java.util.Locale
 
 /**
- * 1:1 Complete Main Camera Settings Modal matching Flutter's _showMainSettings
- * with all 11 mode and subsystem configuration tabs.
+ * Complete Main Camera Settings Modal covering all 11 camera modes and subsystems
+ * with unified Cinema design-system sheet, header, card, slider, and switch tokens.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainSettingsModal(
     state: CameraUiState,
     viewModel: CommixViewModel,
+    initialTab: String? = null,
     onDismiss: () -> Unit
 ) {
-    val tabs = listOf(
-        "PHOTO", "VIDEO", "PRO", "CINEMATIC", "NIGHT", "SLOW-MO", "TIME-LAPSE", "SPATIAL", "FLAGSHIPS", "AUTOMATION", "QUEUE", "GENERAL"
-    )
-    var selectedTab by remember { mutableStateOf(if (state.activeMode in tabs) state.activeMode else "GENERAL") }
+    val tabs = CommixModeCatalog.ALL_SETTINGS_TABS
+    val defaultTab = remember(initialTab, state.activeMode) {
+        when {
+            initialTab != null && initialTab in tabs -> initialTab
+            else -> CommixModeCatalog.resolveSettingsTabForMode(state.activeMode)
+        }
+    }
+    var selectedTab by remember(defaultTab) { mutableStateOf(defaultTab) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xF0121214),
-        dragHandle = { BottomSheetDefaults.DragHandle(color = Color(0x4DFFFFFF)) }
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.88f)
                 .padding(horizontal = 16.dp)
         ) {
-            // Header Bar
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "Camera Settings",
-                        color = Color.White,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(5.dp))
-                            .background(Color(0x26FFD60A))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = state.activeMode,
-                            color = AppleYellow,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-                TextButton(onClick = onDismiss) {
-                    Text(
-                        text = "Done",
-                        color = AppleYellow,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
+            // Unified Sheet Header
+            CommixSheetHeader(
+                title = "Camera Settings",
+                subtitle = "All 11 camera modes & Aether engine",
+                icon = Icons.Default.Settings,
+                badgeText = state.activeMode,
+                onDismiss = onDismiss
+            )
 
             // Mode Tabs Bar
             LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp)
+                    .padding(bottom = 10.dp)
             ) {
                 items(tabs) { tab ->
                     val isSelected = (tab == selectedTab)
                     val isCurrent = (tab == state.activeMode)
+                    val tabAccent = if (tab == "SPATIAL") CinemaCyan else AppleYellow
                     Box(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
-                            .clip(RoundedCornerShape(19.dp))
-                            .background(if (isSelected) Color(0xFF2C2C2E) else Color(0x14FFFFFF))
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(if (isSelected) tabAccent.copy(alpha = 0.18f) else CinemaSurface)
                             .border(
-                                width = if (isSelected) 1.dp else 0.6.dp,
-                                color = if (isSelected) AppleYellow else Color(0x1FFFFFFF),
-                                shape = RoundedCornerShape(19.dp)
+                                width = if (isSelected) 1.1.dp else 0.7.dp,
+                                color = if (isSelected) tabAccent else CinemaGlassBorder,
+                                shape = RoundedCornerShape(18.dp)
                             )
                             .clickable { selectedTab = tab }
                             .padding(horizontal = 12.dp, vertical = 6.dp)
@@ -138,15 +98,17 @@ fun MainSettingsModal(
                                     modifier = Modifier
                                         .size(5.dp)
                                         .clip(RoundedCornerShape(2.5.dp))
-                                        .background(AppleYellow)
+                                        .background(tabAccent)
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                             }
                             Text(
                                 text = tab,
-                                color = if (isSelected) AppleYellow else if (isCurrent) Color.White else Color.Gray,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                                color = if (isSelected) tabAccent else if (isCurrent) CinemaTextLight else CinemaTextDim,
+                                fontSize = 11.5.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
@@ -230,6 +192,21 @@ fun MainSettingsModal(
                                 onSelected = { viewModel.onSetSelfTimer(it.toIntOrNull() ?: 0) }
                             )
                             Spacer(modifier = Modifier.height(10.dp))
+                            SettingsSegmentedRow(
+                                title = "Continuous High-Speed Burst",
+                                subtitle = if (state.burstShotCount <= 1) "Single shutter release" else "${state.burstShotCount}-shot continuous burst capture",
+                                options = listOf("1" to "Off", "3" to "3×", "5" to "5×", "10" to "10×"),
+                                selected = state.burstShotCount.toString(),
+                                onSelected = { viewModel.onSetBurstShotCount(it.toIntOrNull() ?: 1) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Photo Auto-Level Horizon Straightening (±20°)",
+                                subtitle = "Software IMU roll straightening with inscribed aspect-preserving crop",
+                                checked = state.photoAutoLevelEnabled,
+                                onCheckedChange = { viewModel.onTogglePhotoAutoLevel() }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
                             SettingsToggleRow(
                                 title = "Optical Lens Distortion & CA Correction",
                                 subtitle = "Native bilinear radial distortion & chromatic aberration rectification",
@@ -311,7 +288,7 @@ fun MainSettingsModal(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0x1AFFFFFF))
+                                    .background(CinemaSurfaceElevated)
                                     .padding(horizontal = 10.dp, vertical = 8.dp)
                             ) {
                                 TelemetryKeyValueRow(
@@ -321,6 +298,31 @@ fun MainSettingsModal(
                                     fontSizeSp = 11f
                                 )
                             }
+                        }
+
+                        SettingsCard(title = "Hardware + Software Stabilization") {
+                            SettingsSegmentedRow(
+                                title = "Stabilization Engine",
+                                subtitle = "Active: ${state.stabilizationActiveLabel.ifBlank { state.stabilizationEngineMode.uppercase() }}",
+                                options = StabilizationPolicyEngine.ALL_ENGINE_MODES,
+                                selected = StabilizationPolicyEngine.normalizeEngineMode(state.stabilizationEngineMode),
+                                onSelected = { viewModel.onSetStabilizationEngineMode(it) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsSegmentedRow(
+                                title = "When To Apply Stabilization",
+                                subtitle = "Choose whether stabilization runs in preview, capture only, or post-export",
+                                options = StabilizationPolicyEngine.ALL_APPLY_TIMINGS,
+                                selected = StabilizationPolicyEngine.normalizeApplyWhen(state.stabilizationApplyWhen),
+                                onSelected = { viewModel.onSetStabilizationApplyWhen(it) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Gyroflow v1.3 .gcsv Sidecar Export",
+                                subtitle = "Save synchronized high-rate IMU gyro logs alongside every video recording",
+                                checked = state.gyroflowExportEnabled,
+                                onCheckedChange = { viewModel.onToggleGyroflowExport() }
+                            )
                         }
 
                         SettingsCard(title = "Audio Pipeline & Viewfinder") {
@@ -375,6 +377,37 @@ fun MainSettingsModal(
                                 subtitle = "Real-time hue and chroma saturation polar graticule",
                                 checked = state.showVectorscope,
                                 onCheckedChange = { viewModel.toggleVectorscope() }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Zebra Highlight Clipping Overlay",
+                                subtitle = "Live diagonal stripes over sensor regions exceeding IRE threshold",
+                                checked = state.showZebras,
+                                onCheckedChange = { viewModel.onToggleZebras() }
+                            )
+                            if (state.showZebras) {
+                                Spacer(modifier = Modifier.height(10.dp))
+                                SettingsSegmentedRow(
+                                    title = "Zebra IRE Threshold",
+                                    subtitle = "Highlight warning trigger level (${state.zebraThresholdIre}% IRE)",
+                                    options = listOf("70" to "70%", "85" to "85%", "95" to "95%", "100" to "100%"),
+                                    selected = state.zebraThresholdIre.toString(),
+                                    onSelected = { viewModel.onSetZebraThreshold(it.toIntOrNull() ?: 95) }
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "False Color IRE Exposure Heatmap",
+                                subtitle = "Cinema ARRI/Blackmagic IRE color bands for exact skin & clip metering",
+                                checked = state.showFalseColor,
+                                onCheckedChange = { viewModel.onToggleFalseColor() }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Broadcast Safe-Area Guides (90% / 80% / 9:16)",
+                                subtitle = "Action safe, title safe, and vertical social crop framing markers",
+                                checked = state.showSafeAreaGuides,
+                                onCheckedChange = { viewModel.onToggleSafeAreaGuides() }
                             )
                             Spacer(modifier = Modifier.height(10.dp))
                             SettingsSegmentedRow(
@@ -445,6 +478,53 @@ fun MainSettingsModal(
                                 selected = state.nightTone,
                                 onSelected = { viewModel.onSetNightTone(it) }
                             )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Astrophotography Red Vision UI",
+                                subtitle = "Subtle dark-adaptation red screen tint to preserve night vision",
+                                checked = state.nightRedUiEnabled,
+                                onCheckedChange = { viewModel.onToggleNightRedUi() }
+                            )
+                        }
+                    }
+
+                    "LONG EXP" -> {
+                        SettingsCard(title = "Computational Long Exposure") {
+                            SettingsSegmentedRow(
+                                title = "Long Exposure Style",
+                                subtitle = state.longExposureStyle.replace("_", " ").uppercase(),
+                                options = listOf(
+                                    "silky_water" to "Silky Water",
+                                    "light_trails" to "Light Trails",
+                                    "star_trails" to "Star Trails",
+                                    "moving_crowd" to "Moving Crowd"
+                                ),
+                                selected = state.longExposureStyle,
+                                onSelected = { viewModel.onSetLongExposureStyle(it) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsSegmentedRow(
+                                title = "Frame Stack Depth",
+                                subtitle = "${state.longExposureFrames} aligned frames averaged/peak-blended",
+                                options = listOf("4" to "4f", "8" to "8f", "12" to "12f", "16" to "16f"),
+                                selected = state.longExposureFrames.toString(),
+                                onSelected = { viewModel.onSetLongExposureFrames(it.toIntOrNull() ?: 8) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsSegmentedRow(
+                                title = "Electronic ND Filter (e-ND)",
+                                subtitle = if (state.ndFilter == "off") "Disabled" else state.ndFilter.uppercase(),
+                                options = listOf("off" to "Off", "nd4" to "ND4", "nd8" to "ND8", "nd16" to "ND16", "nd64" to "ND64"),
+                                selected = state.ndFilter,
+                                onSelected = { viewModel.onNdFilterChanged(it) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Tripod AE/AF Lock",
+                                subtitle = "Lock exposure & focus plane across the entire stack",
+                                checked = state.aeAfLocked,
+                                onCheckedChange = { viewModel.onToggleAeAfLock() }
+                            )
                         }
                     }
 
@@ -453,9 +533,18 @@ fun MainSettingsModal(
                             SettingsSegmentedRow(
                                 title = "Sensor Readout FPS",
                                 subtitle = "Hardware sensor high-speed rate",
-                                options = listOf("120" to "120 FPS (4×)", "240" to "240 FPS (8×)"),
+                                options = listOf("60" to "60 FPS", "120" to "120 FPS", "240" to "240 FPS", "480" to "480 FPS"),
                                 selected = state.slowMoFps.toString(),
                                 onSelected = { viewModel.onSetSlowMoFps(it.toIntOrNull() ?: 120) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            val dilation = (state.slowMoFps.toDouble() / state.slowMoPlaybackFps.coerceAtLeast(1)).coerceAtLeast(1.0)
+                            SettingsSegmentedRow(
+                                title = "Output Playback Frame Rate",
+                                subtitle = String.format(Locale.US, "%dp timeline · 1/%.1f× motion dilation", state.slowMoPlaybackFps, dilation),
+                                options = listOf("24" to "24p Cine", "30" to "30p Std", "60" to "60p Smooth"),
+                                selected = state.slowMoPlaybackFps.toString(),
+                                onSelected = { viewModel.onSetSlowMoPlaybackFps(it.toIntOrNull() ?: 30) }
                             )
                         }
                     }
@@ -468,6 +557,50 @@ fun MainSettingsModal(
                                 options = listOf("1" to "1 sec", "2" to "2 sec", "5" to "5 sec", "10" to "10 sec", "30" to "30 sec"),
                                 selected = state.timeLapseIntervalSec.toString(),
                                 onSelected = { viewModel.onSetTimeLapseInterval(it.toIntOrNull() ?: 2) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsSegmentedRow(
+                                title = "Intervalometer Shot Limit",
+                                subtitle = if (state.timeLapseShotLimit <= 0) "Unlimited until manual stop" else "Auto-stop at ${state.timeLapseShotLimit} frames (${state.timeLapseShotLimit / 30}s @ 30fps)",
+                                options = listOf("0" to "∞", "60" to "60 (2s)", "150" to "150 (5s)", "300" to "300 (10s)", "600" to "600 (20s)"),
+                                selected = state.timeLapseShotLimit.toString(),
+                                onSelected = { viewModel.onSetTimeLapseShotLimit(it.toIntOrNull() ?: 0) }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "De-Flicker AE/AF Lock",
+                                subtitle = "Lock ISO, shutter & focus to eliminate exposure flicker",
+                                checked = state.aeAfLocked,
+                                onCheckedChange = { viewModel.onToggleAeAfLock() }
+                            )
+                        }
+                    }
+
+                    "PANORAMA" -> {
+                        SettingsCard(title = "Panoramic & 360° Sweep") {
+                            SettingsSegmentedRow(
+                                title = "Panorama Projection Mode",
+                                subtitle = if (state.is360SphereMode) "Full 360° cylindrical sweep" else "Wide horizontal sweep (180°)",
+                                options = listOf("wide" to "Wide Sweep", "sphere" to "360° Sphere"),
+                                selected = if (state.is360SphereMode) "sphere" else "wide",
+                                onSelected = { choice ->
+                                    val want360 = (choice == "sphere")
+                                    if (state.is360SphereMode != want360) viewModel.onToggle360SphereMode()
+                                }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Horizon Leveling Guide",
+                                subtitle = "Display live roll & pitch balance indicators during sweep",
+                                checked = state.showHorizonLeveler,
+                                onCheckedChange = { viewModel.toggleHorizon() }
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            SettingsToggleRow(
+                                title = "Lock Exposure Across Slices",
+                                subtitle = "Prevent brightness seams between adjacent stitched tiles",
+                                checked = state.aeAfLocked,
+                                onCheckedChange = { viewModel.onToggleAeAfLock() }
                             )
                         }
                     }
@@ -489,8 +622,8 @@ fun MainSettingsModal(
                             SettingsSegmentedRow(
                                 title = "Trigger Mode",
                                 subtitle = "Automation start event",
-                                options = listOf("timer" to "Timer (3s)", "audio_clap" to "Audio Clap", "gyro_shake" to "Gyro Shake"),
-                                selected = state.automationTriggerMode,
+                                options = CommixModeCatalog.AUTOMATION_TRIGGER_OPTIONS,
+                                selected = CommixModeCatalog.normalizeAutomationTrigger(state.automationTriggerMode),
                                 onSelected = { viewModel.onSetAutomationTrigger(it) }
                             )
                             Spacer(modifier = Modifier.height(10.dp))
@@ -534,7 +667,7 @@ fun MainSettingsModal(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0x1AFFFFFF))
+                                    .background(CinemaSurfaceElevated)
                                     .padding(horizontal = 10.dp, vertical = 8.dp)
                             ) {
                                 TelemetryKeyValueRow(
@@ -631,16 +764,16 @@ fun MainSettingsModal(
                             ) {
                                 Button(
                                     onClick = { viewModel.onSetExifPreset(false) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0x26FFFFFF)),
+                                    colors = ButtonDefaults.buttonColors(containerColor = CinemaSurfaceElevated),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Text("Allow All", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                                    Text("Allow All", color = CinemaTextLight, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                                 }
                                 Button(
                                     onClick = { viewModel.onSetExifPreset(true) },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0x33FFD60A)),
+                                    colors = ButtonDefaults.buttonColors(containerColor = AppleYellow.copy(alpha = 0.2f)),
                                     shape = RoundedCornerShape(8.dp),
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                                     modifier = Modifier.weight(1f)
@@ -699,7 +832,7 @@ fun MainSettingsModal(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0x1AFFFFFF))
+                                    .background(CinemaSurfaceElevated)
                                     .padding(10.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -713,23 +846,33 @@ fun MainSettingsModal(
                                 )
                                 TelemetryKeyValueRow(
                                     label = "Optical Stabilization (OIS)",
-                                    value = if (activeCam?.hasOis == true) "Hardware VCM [HW]" else "Gyro Shift [SW]",
-                                    valueColor = if (activeCam?.hasOis == true) CinemaGreen else Color(0xFFFF9500)
+                                    value = if (activeCam?.hasOis == true) "Hardware VCM [HW]" else "SW Fallback",
+                                    valueColor = if (activeCam?.hasOis == true) CinemaGreen else CinemaAmber
                                 )
                                 TelemetryKeyValueRow(
                                     label = "Electronic Stabilization (EIS)",
-                                    value = if (state.eisMode == "legend") "EIS LEGEND [HW+SW]" else if (activeCam?.hasEis == true) "HAL Stream [HW]" else "Gyro Path [SW]",
-                                    valueColor = CinemaGreen
+                                    value = if (activeCam?.hasEis == true) "HAL Stream [HW]" else "Gyroflow [SW]",
+                                    valueColor = if (activeCam?.hasEis == true) CinemaGreen else CinemaAmber
+                                )
+                                TelemetryKeyValueRow(
+                                    label = "Preview Stabilization (API 33+)",
+                                    value = if (activeCam?.hasPreviewStabilization == true) "Supported [HW]" else "Standard EIS",
+                                    valueColor = if (activeCam?.hasPreviewStabilization == true) CinemaGreen else CinemaTextDim
+                                )
+                                TelemetryKeyValueRow(
+                                    label = "Active Stabilization Policy",
+                                    value = state.stabilizationActiveLabel.ifBlank { state.stabilizationEngineMode.uppercase() },
+                                    valueColor = AppleYellow
                                 )
                                 TelemetryKeyValueRow(
                                     label = "Dynamic Range (HDR)",
                                     value = if (activeCam?.hasRaw == true) "Staggered [HW]" else "Mertens HDR+ [SW]",
-                                    valueColor = if (activeCam?.hasRaw == true) CinemaGreen else Color(0xFFFF9500)
+                                    valueColor = if (activeCam?.hasRaw == true) CinemaGreen else CinemaAmber
                                 )
                                 TelemetryKeyValueRow(
                                     label = "RAW Bayer Stream",
                                     value = if (activeCam?.hasRaw == true) "Bayer CFA [HW]" else "Lossless RGB [SW]",
-                                    valueColor = if (activeCam?.hasRaw == true) CinemaGreen else Color(0xFFFF9500)
+                                    valueColor = if (activeCam?.hasRaw == true) CinemaGreen else CinemaAmber
                                 )
                             }
                         }
@@ -763,7 +906,7 @@ fun MainSettingsModal(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(8.dp))
-                                    .background(Color(0x1AFFFFFF))
+                                    .background(CinemaSurfaceElevated)
                                     .padding(10.dp),
                                 verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -797,22 +940,7 @@ private fun SettingsCard(
     title: String,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(Color(0xFF1C1C1E))
-            .padding(14.dp)
-    ) {
-        Text(
-            text = title,
-            color = AppleYellow,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(bottom = 10.dp)
-        )
-        content()
-    }
+    CommixSectionCard(title = title, content = content)
 }
 
 @Composable
@@ -828,18 +956,13 @@ private fun SettingsToggleRow(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(text = title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            Text(text = subtitle, color = CinemaTextLight, fontSize = 10.sp, lineHeight = 13.sp)
+            Text(text = title, color = CinemaTextLight, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(text = subtitle, color = CinemaTextDim, fontSize = 10.5.sp, lineHeight = 14.sp)
         }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.Black,
-                checkedTrackColor = AppleYellow,
-                uncheckedThumbColor = Color.White,
-                uncheckedTrackColor = Color(0x33FFFFFF)
-            )
+            colors = commixSwitchColors()
         )
     }
 }
@@ -914,7 +1037,7 @@ private fun SettingsSegmentedRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0x1AFFFFFF))
+                    .background(CinemaSurfaceElevated)
                     .horizontalScroll(rememberScrollState())
                     .padding(3.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -946,7 +1069,7 @@ private fun SettingsSegmentedRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0x1AFFFFFF))
+                    .background(CinemaSurfaceElevated)
                     .padding(3.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp)
             ) {
@@ -1013,11 +1136,7 @@ private fun SettingsSliderRow(
             value = value,
             onValueChange = onValueChange,
             valueRange = range,
-            colors = SliderDefaults.colors(
-                thumbColor = AppleYellow,
-                activeTrackColor = AppleYellow,
-                inactiveTrackColor = Color(0x33FFFFFF)
-            )
+            colors = commixSliderColors()
         )
     }
 }

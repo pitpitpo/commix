@@ -54,7 +54,8 @@ data class CameraProbeResult(
     val opticalZoomFactor: Float = 1.0f,
     val rawSensorSize: Size? = null,
     val maxFps: Double = 30.0,
-    val discoverySource: String = "HAL"
+    val discoverySource: String = "HAL",
+    val hasPreviewStabilization: Boolean = false
 )
 
 /**
@@ -259,8 +260,11 @@ object LensProbeService {
 
         val hasOis = (c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION) ?: IntArray(0))
             .contains(CameraCharacteristics.LENS_OPTICAL_STABILIZATION_MODE_ON)
-        val hasEis = (c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0))
-            .contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        val videoStabModes = c.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        val hasEis = videoStabModes.contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        val hasPreviewStabilization = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            videoStabModes.contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)
+        } else false
         val hasAf = minFocus > 0f
         val hasRaw = caps.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)
         val isUltraHighRes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -479,7 +483,8 @@ object LensProbeService {
             opticalZoomFactor = 1.0f,
             rawSensorSize = rawSensorSize,
             maxFps = peakFps,
-            discoverySource = discoverySource
+            discoverySource = discoverySource,
+            hasPreviewStabilization = hasPreviewStabilization
         )
     }
 

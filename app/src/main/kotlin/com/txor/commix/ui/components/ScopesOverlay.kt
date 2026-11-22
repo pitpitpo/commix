@@ -27,6 +27,13 @@ fun ScopesOverlay(
     gridType: String = "3x3",
     showVectorscope: Boolean = false,
     showRgbParade: Boolean = false,
+    showZebras: Boolean = false,
+    zebraThresholdIre: Int = 95,
+    showFalseColor: Boolean = false,
+    showSafeAreaGuides: Boolean = false,
+    lumaGrid: FloatArray = FloatArray(0),
+    lumaGridW: Int = 32,
+    lumaGridH: Int = 24,
     rollDeg: Float = 0f,
     pitchDeg: Float = 0f,
     waveformCols: FloatArray = FloatArray(0),
@@ -47,6 +54,121 @@ fun ScopesOverlay(
     Canvas(modifier = modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
+
+        // 0A. Real-time Cinema False Color IRE Exposure Heatmap (ARRI / Blackmagic IRE scale)
+        if (showFalseColor && lumaGrid.isNotEmpty() && lumaGridW > 0 && lumaGridH > 0) {
+            val cellW = w / lumaGridW.toFloat()
+            val cellH = h / lumaGridH.toFloat()
+            val expected = lumaGridW * lumaGridH
+            val count = minOf(lumaGrid.size, expected)
+            for (idx in 0 until count) {
+                val ire = lumaGrid[idx]
+                val fcColor = when {
+                    ire < 6f -> Color(0x887C4DFF)   // Crushed blacks (Purple)
+                    ire < 18f -> Color(0x782979FF)  // Deep shadows (Blue)
+                    ire in 38f..45f -> Color(0x7800E676) // 18% Middle Gray (Green)
+                    ire in 52f..62f -> Color(0x78FF80AB) // Skin Tone Key (Pink)
+                    ire in 78f..93f -> Color(0x80FFD600) // Hot Highlights (Yellow)
+                    ire >= 94f -> Color(0x99FF1744) // Clipped Overexposure (Red)
+                    else -> Color.Transparent
+                }
+                if (fcColor != Color.Transparent) {
+                    val gx = idx % lumaGridW
+                    val gy = idx / lumaGridW
+                    drawRect(
+                        color = fcColor,
+                        topLeft = Offset(gx * cellW, gy * cellH),
+                        size = Size(cellW + 0.5f, cellH + 0.5f)
+                    )
+                }
+            }
+            // Compact IRE False Color reference legend strip along top safe border
+            val legendW = minOf(156.dp.toPx(), w * 0.48f)
+            val legendH = 6.dp.toPx()
+            val legendX = (w - legendW) / 2f
+            val legendY = 16.dp.toPx()
+            val bands = listOf(
+                Color(0xCC7C4DFF),
+                Color(0xCC2979FF),
+                Color(0xCC424242),
+                Color(0xCC00E676),
+                Color(0xCCFF80AB),
+                Color(0xCCFFD600),
+                Color(0xCCFF1744)
+            )
+            val bandW = legendW / bands.size
+            bands.forEachIndexed { bi, col ->
+                drawRect(
+                    color = col,
+                    topLeft = Offset(legendX + bi * bandW, legendY),
+                    size = Size(bandW, legendH)
+                )
+            }
+            drawRect(
+                color = Color(0x88FFFFFF),
+                topLeft = Offset(legendX, legendY),
+                size = Size(legendW, legendH),
+                style = Stroke(width = 1f)
+            )
+        }
+
+        // 0B. Real-time Zebra Highlight Clipping Stripes (70 / 85 / 95 / 100% IRE)
+        if (showZebras && lumaGrid.isNotEmpty() && lumaGridW > 0 && lumaGridH > 0) {
+            val cellW = w / lumaGridW.toFloat()
+            val cellH = h / lumaGridH.toFloat()
+            val thresh = zebraThresholdIre.coerceIn(70, 100).toFloat()
+            val zebraColor = if (thresh >= 95f) RecordingRed.copy(alpha = 0.78f) else AppleYellow.copy(alpha = 0.78f)
+            val strokePx = 1.6.dp.toPx()
+            val count = minOf(lumaGrid.size, lumaGridW * lumaGridH)
+            for (idx in 0 until count) {
+                if (lumaGrid[idx] >= thresh) {
+                    val gx = idx % lumaGridW
+                    val gy = idx / lumaGridW
+                    val x0 = gx * cellW
+                    val y0 = gy * cellH
+                    // Crisp 45-degree double diagonal zebra stripes per hot cell
+                    drawLine(
+                        color = zebraColor,
+                        start = Offset(x0, y0 + cellH * 0.65f),
+                        end = Offset(x0 + cellW * 0.65f, y0),
+                        strokeWidth = strokePx
+                    )
+                    drawLine(
+                        color = zebraColor,
+                        start = Offset(x0 + cellW * 0.35f, y0 + cellH),
+                        end = Offset(x0 + cellW, y0 + cellH * 0.35f),
+                        strokeWidth = strokePx
+                    )
+                }
+            }
+        }
+
+        // 0C. Broadcast Safe-Area Frame Guides (90% Action Safe, 80% Title Safe, 9:16 Social Crop)
+        if (showSafeAreaGuides) {
+            // 90% Action Safe
+            drawRect(
+                color = CinemaCyan.copy(alpha = 0.55f),
+                topLeft = Offset(w * 0.05f, h * 0.05f),
+                size = Size(w * 0.90f, h * 0.90f),
+                style = Stroke(width = 1.1.dp.toPx())
+            )
+            // 80% Title Safe
+            drawRect(
+                color = AppleYellow.copy(alpha = 0.45f),
+                topLeft = Offset(w * 0.10f, h * 0.10f),
+                size = Size(w * 0.80f, h * 0.80f),
+                style = Stroke(width = 1.0.dp.toPx())
+            )
+            // 9:16 Vertical Social Center Crop Markers (when viewport is wider than 9:16)
+            val socialW = h * (9f / 16f)
+            if (socialW < w * 0.94f) {
+                val sx0 = (w - socialW) / 2f
+                val sx1 = sx0 + socialW
+                val markerColor = Color(0x88FFFFFF)
+                drawLine(markerColor, Offset(sx0, h * 0.05f), Offset(sx0, h * 0.95f), strokeWidth = 1.0.dp.toPx())
+                drawLine(markerColor, Offset(sx1, h * 0.05f), Offset(sx1, h * 0.95f), strokeWidth = 1.0.dp.toPx())
+            }
+        }
 
         // 1. Composition Guides (3x3, 4x4, Golden Ratio, Diagonal, Crosshair)
         if (showGrid && gridType != "off") {

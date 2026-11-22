@@ -14,19 +14,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.txor.commix.*
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaGreen
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.*
+import com.txor.commix.ui.theme.*
 
 /**
- * High-performance background processing job queue modal matching Flutter's
- * _showJobQueueModal and screen_installed.png.
+ * Background processing job queue modal using unified Cinema design-system primitives.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,21 +39,7 @@ fun JobQueueModal(
     val pendingCount = queue.pendingJobCount
     val completedCount = queue.completedJobCount
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1C1C1E),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = 10.dp, bottom = 6.dp)
-                    .width(36.dp)
-                    .height(5.dp)
-                    .clip(RoundedCornerShape(2.5.dp))
-                    .background(Color(0x4DFFFFFF))
-            )
-        },
-        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -63,99 +47,45 @@ fun JobQueueModal(
                 .padding(horizontal = 16.dp)
                 .navigationBarsPadding()
         ) {
-            // Header Row: Icon + Title + Status + Done button
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0x33FFD60A))
-                            .padding(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Layers,
-                            contentDescription = "Queue",
-                            tint = AppleYellow,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Processing Job Queue",
-                            color = Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.5.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "$activeCount Active · $pendingCount Pending · $completedCount Done",
-                            color = CinemaTextLight,
-                            fontSize = 10.5.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color(0x26FFFFFF))
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = "Done",
-                        color = AppleYellow,
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
+            CommixSheetHeader(
+                title = "Processing Job Queue",
+                subtitle = "$activeCount Active · $pendingCount Pending · $completedCount Done",
+                icon = Icons.Default.Layers,
+                onDismiss = onDismiss
+            )
 
             // Action Buttons Row: Pause/Resume + Clear Done
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // Pause / Resume Button
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(if (isPaused) Color(0x3330D158) else Color(0x26FFFFFF))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isPaused) CinemaGreen.copy(alpha = 0.2f) else CinemaSurface)
+                        .border(
+                            0.8.dp,
+                            if (isPaused) CinemaGreen.copy(alpha = 0.6f) else CinemaGlassBorder,
+                            RoundedCornerShape(10.dp)
+                        )
                         .clickable {
                             if (isPaused) queue.resumeAll() else queue.pauseAll()
                         }
-                        .padding(vertical = 9.dp)
+                        .padding(vertical = 10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             imageVector = if (isPaused) Icons.Default.PlayArrow else Icons.Default.Pause,
                             contentDescription = null,
-                            tint = if (isPaused) CinemaGreen else Color.White,
+                            tint = if (isPaused) CinemaGreen else CinemaTextLight,
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = if (isPaused) "Resume Queue" else "Pause Queue",
-                            color = if (isPaused) CinemaGreen else Color.White,
+                            color = if (isPaused) CinemaGreen else CinemaTextLight,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             maxLines = 1,
@@ -165,27 +95,27 @@ fun JobQueueModal(
                     }
                 }
 
-                // Clear Done Button
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0x1FFFFFFF))
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(CinemaSurface)
+                        .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(10.dp))
                         .clickable { queue.clearCompleted() }
-                        .padding(vertical = 9.dp)
+                        .padding(vertical = 10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
                             imageVector = Icons.Default.DeleteOutline,
                             contentDescription = null,
-                            tint = Color.Gray,
+                            tint = CinemaTextDim,
                             modifier = Modifier.size(15.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "Clear Done",
-                            color = Color.Gray,
+                            color = CinemaTextDim,
                             fontWeight = FontWeight.Bold,
                             fontSize = 12.sp,
                             maxLines = 1,
@@ -195,19 +125,19 @@ fun JobQueueModal(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-            // Action Button Row 2: Run Engine Demo
+            // Pipeline Diagnostic Job Button
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0x26FFD60A))
-                    .border(0.8.dp, AppleYellow.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AppleYellow.copy(alpha = 0.16f))
+                    .border(0.8.dp, AppleYellow.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
                     .clickable {
                         queue.enqueueJob(
-                            title = "Engine Demo: Virtual Gimbal 60fps Stack",
+                            title = "Pipeline Check: Virtual Gimbal 60fps Stack",
                             type = ProcessingJobType.VIDEO_STABILIZATION,
                             priority = JobPriority.HIGH,
                             executionBlock = { updateProgress ->
@@ -221,18 +151,18 @@ fun JobQueueModal(
                             }
                         )
                     }
-                    .padding(vertical = 8.dp)
+                    .padding(vertical = 9.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = Icons.Default.PlayCircle,
                         contentDescription = null,
                         tint = AppleYellow,
-                        modifier = Modifier.size(15.dp)
+                        modifier = Modifier.size(16.dp)
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Run Engine Demo Job",
+                        text = "Run Pipeline Diagnostic Job",
                         color = AppleYellow,
                         fontWeight = FontWeight.Bold,
                         fontSize = 12.sp
@@ -242,7 +172,6 @@ fun JobQueueModal(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Job List or Empty State
             if (jobs.isEmpty()) {
                 Box(
                     contentAlignment = Alignment.Center,
@@ -257,22 +186,22 @@ fun JobQueueModal(
                         Icon(
                             imageVector = Icons.Default.Inbox,
                             contentDescription = null,
-                            tint = Color.White.copy(alpha = 0.3f),
+                            tint = CinemaTextDim.copy(alpha = 0.5f),
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
                             text = "No Jobs in Queue",
-                            color = Color.White,
+                            color = CinemaTextLight,
                             fontWeight = FontWeight.Bold,
                             fontSize = 15.sp
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
                             text = "Background video stabilization, exposure stacking,\nand media exports will be processed here.",
-                            color = CinemaTextLight,
+                            color = CinemaTextDim,
                             fontSize = 11.5.sp,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            textAlign = TextAlign.Center
                         )
                     }
                 }
@@ -300,19 +229,19 @@ private fun JobItemCard(
 ) {
     val statusColor = when (job.status) {
         JobStatus.RUNNING -> AppleYellow
-        JobStatus.PENDING -> Color(0xFF007AFF)
-        JobStatus.PAUSED -> Color(0xFFFF9500)
+        JobStatus.PENDING -> CinemaBlue
+        JobStatus.PAUSED -> CinemaAmber
         JobStatus.COMPLETED -> CinemaGreen
-        JobStatus.FAILED -> Color(0xFFFF453A)
-        JobStatus.CANCELLED -> Color.Gray
+        JobStatus.FAILED -> RecordingRed
+        JobStatus.CANCELLED -> CinemaGrey
     }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0x1AFFFFFF))
-            .border(0.8.dp, Color(0x1FFFFFFF), RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .background(CinemaSurface)
+            .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(12.dp))
             .padding(12.dp)
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -325,23 +254,15 @@ private fun JobItemCard(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(statusColor.copy(alpha = 0.2f))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = job.type.shortCode,
-                            color = statusColor,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 9.sp
-                        )
-                    }
+                    CommixBadgePill(
+                        text = job.type.shortCode,
+                        accentColor = statusColor,
+                        monospace = true
+                    )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = job.title,
-                        color = Color.White,
+                        color = CinemaTextLight,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 12.5.sp,
                         maxLines = 1,
@@ -351,57 +272,42 @@ private fun JobItemCard(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(statusColor.copy(alpha = 0.25f))
-                        .padding(horizontal = 7.dp, vertical = 3.dp)
-                ) {
-                    Text(
-                        text = job.status.displayLabel,
-                        color = statusColor,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 10.sp
-                    )
-                }
+                CommixBadgePill(
+                    text = job.status.displayLabel,
+                    accentColor = statusColor
+                )
             }
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            // Stage Description
             Text(
                 text = job.currentStage,
-                color = CinemaTextLight,
+                color = CinemaTextDim,
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
-            // Progress Bar if running or active
             if (job.status.isActive) {
                 Spacer(modifier = Modifier.height(6.dp))
                 LinearProgressIndicator(
                     progress = { job.progress.coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(3.dp)
-                        .clip(RoundedCornerShape(1.5.dp)),
+                        .height(3.5.dp)
+                        .clip(RoundedCornerShape(2.dp)),
                     color = AppleYellow,
-                    trackColor = Color(0x33FFFFFF)
+                    trackColor = CinemaGlassBorder
                 )
-            }
-
-            // Cancel action if running or pending
-            if (job.status.isActive) {
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Row(
                     horizontalArrangement = Arrangement.End,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
                         text = "Cancel",
-                        color = Color(0xFFFF453A),
-                        fontWeight = FontWeight.Medium,
+                        color = RecordingRed,
+                        fontWeight = FontWeight.SemiBold,
                         fontSize = 11.sp,
                         modifier = Modifier.clickable { onCancel() }
                     )

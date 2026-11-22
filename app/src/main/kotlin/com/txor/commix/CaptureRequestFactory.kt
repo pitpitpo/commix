@@ -27,7 +27,15 @@ data class CaptureRequestParams(
     val zoomRatioRange: Range<Float>? = null,
     val oisMode: String = "standard", // "off", "standard", "cinematic"
     val eisMode: String = "legend",   // "off", "standard", "super_steady", "legend"
+    val stabilizationEngineMode: String = StabilizationPolicyEngine.ENGINE_HYBRID,
+    val stabilizationApplyWhen: String = StabilizationPolicyEngine.APPLY_ALWAYS,
+    val photoAutoLevelEnabled: Boolean = false,
+    val gyroflowExportEnabled: Boolean = true,
     val hasOisHardware: Boolean = false,
+    val hasEisHardware: Boolean = true,
+    val hasPreviewStabilizationHardware: Boolean = false,
+    val isCapturePhaseActive: Boolean = false,
+    val isVideoRecordingPhase: Boolean = false,
     val activeMode: String = "PHOTO",
     val targetPhotoMp: Double = 0.0,
     val videoResolution: String = "1920x1080",
@@ -390,21 +398,39 @@ object CaptureRequestFactory {
             }
         } catch (_: Throwable) {}
 
-        // --- 5. STABILIZATION (OIS & EIS) ---
+        // --- 5. STABILIZATION (Unified Hardware OIS + Software/HAL EIS + Preview Stabilization) ---
         try {
+            val phase = when {
+                params.isVideoRecordingPhase -> StabilizationPolicyEngine.CapturePhase.VIDEO_RECORDING
+                params.isCapturePhaseActive -> StabilizationPolicyEngine.CapturePhase.STILL_CAPTURE
+                else -> StabilizationPolicyEngine.CapturePhase.PREVIEW
+            }
+            // Honor explicit legacy off toggles if caller configured oisMode/eisMode directly
+            val effectiveEngine = if (params.oisMode == "off" && params.eisMode == "off") {
+                StabilizationPolicyEngine.ENGINE_OFF
+            } else {
+                params.stabilizationEngineMode
+            }
+            val stabPlan = StabilizationPolicyEngine.resolve(
+                engineModeRaw = effectiveEngine,
+                applyWhenRaw = params.stabilizationApplyWhen,
+                phase = phase,
+                activeCameraMode = params.activeMode,
+                caps = StabilizationPolicyEngine.HardwareCapabilities(
+                    hasOis = params.hasOisHardware,
+                    hasEis = params.hasEisHardware,
+                    hasPreviewStabilization = params.hasPreviewStabilizationHardware,
+                    apiLevel = Build.VERSION.SDK_INT
+                ),
+                photoAutoLevelEnabled = params.photoAutoLevelEnabled,
+                gyroflowExportEnabled = params.gyroflowExportEnabled
+            )
             if (params.hasOisHardware) {
-                val oisVal = when (params.oisMode) {
-                    "off" -> CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_OFF
-                    else -> CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
-                }
-                builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, oisVal)
+                builder.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, stabPlan.halOisMode)
             }
-
-            val eisVal = when (params.eisMode) {
-                "off" -> CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF
-                else -> CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_ON
+            if (params.hasEisHardware || params.hasPreviewStabilizationHardware || stabPlan.halVideoStabilizationMode == StabilizationPolicyEngine.HAL_EIS_OFF) {
+                builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, stabPlan.halVideoStabilizationMode)
             }
-            builder.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, eisVal)
         } catch (_: Throwable) {}
 
         // --- 6. PROCESS ZERO vs MAXIMUM HIGH-QUALITY ISP PIPELINE ---

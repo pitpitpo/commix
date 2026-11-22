@@ -37,7 +37,9 @@ import com.txor.commix.SpatialFov
 import com.txor.commix.SpatialTargetNode
 import com.txor.commix.ui.theme.AppleYellow
 import com.txor.commix.ui.theme.CinemaCyan
+import com.txor.commix.ui.theme.CinemaGlass
 import com.txor.commix.ui.theme.CinemaGreen
+import com.txor.commix.ui.theme.RecordingRed
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -295,15 +297,16 @@ fun SpatialGuidanceOverlay(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xCC000000))
-                            .border(0.8.dp, Color(0x66FF453A), RoundedCornerShape(10.dp))
+                            .background(CinemaGlass)
+                            .border(0.8.dp, RecordingRed.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                            .testTag("spatial_cancel_button")
                             .clickable { onCancelCapture() }
                             .padding(horizontal = 8.dp, vertical = 5.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Cancel Spatial",
-                            tint = Color(0xFFFF6961),
+                            tint = RecordingRed,
                             modifier = Modifier.size(14.dp)
                         )
                     }

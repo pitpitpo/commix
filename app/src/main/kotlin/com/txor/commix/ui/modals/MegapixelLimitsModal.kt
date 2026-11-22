@@ -9,22 +9,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.*
+import com.txor.commix.ui.theme.*
+import java.util.Locale
 
 /**
- * 1:1 Megapixel Limits Driver bottom sheet modal matching Flutter's
- * _showMpPicker and screen_settings_opened.png.
+ * Megapixel Limits & Sensor Resolution Driver bottom sheet using unified Cinema tokens.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,184 +45,125 @@ fun MegapixelLimitsModal(
         (standard.filter { it < maxMp - 0.5 } + maxMp).distinct().sorted()
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1C1C1E),
-        dragHandle = null,
-        shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp)
                 .navigationBarsPadding()
         ) {
-            // Header Row: Title + Tag + Done
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(
-                        text = "MEGAPIXEL LIMITS",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0x33FFD60A))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "MAX ${maxMp.toInt()}MP",
-                            color = AppleYellow,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Done",
-                    color = AppleYellow,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(14.dp))
-
-            // Subtitle 1: Hardware Sensor Presets
-            Text(
-                text = "Hardware Sensor Presets (Max: ${maxMp.toInt()} MP):",
-                color = CinemaTextLight,
-                fontSize = 11.sp
+            CommixSheetHeader(
+                title = "Megapixel Limits",
+                subtitle = if (isHiRes) "Hi-Res full-sensor readout active" else "Hardware sensor resolution target",
+                icon = Icons.Default.HighQuality,
+                badgeText = "MAX ${maxMp.toInt()}MP",
+                onDismiss = onDismiss
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            CommixSectionCard(title = "Hardware Sensor Presets") {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(presets) { preset ->
+                        val isSel = kotlin.math.abs(sliderValue - preset.toFloat()) < 0.6f
+                        val isPresetMax = kotlin.math.abs(preset - maxMp) < 0.5
+                        val label = when {
+                            isPresetMax -> "${preset.toInt()}MP MAX"
+                            preset == 16.0 -> "16MP BINNED"
+                            else -> "${preset.toInt()}MP"
+                        }
+                        val activeBg = if (isPresetMax) AppleYellow else CinemaBlue
 
-            // Presets Horizontal Row
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                items(presets) { preset ->
-                    val isSel = kotlin.math.abs(sliderValue - preset.toFloat()) < 0.6f
-                    val isPresetMax = kotlin.math.abs(preset - maxMp) < 0.5
-                    val label = when {
-                        isPresetMax -> "${preset.toInt()}MP MAX"
-                        preset == 16.0 -> "16MP BINNED"
-                        else -> "${preset.toInt()}MP"
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(
-                                if (isSel) {
-                                    if (isPresetMax) AppleYellow else Color(0xFF007AFF)
-                                } else Color(0x22FFFFFF)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (isSel) activeBg else CinemaSurfaceElevated)
+                                .border(
+                                    0.8.dp,
+                                    if (isSel) activeBg else CinemaGlassBorder,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .clickable {
+                                    sliderValue = preset.toFloat()
+                                    onMpSelected(preset)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 7.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (isSel && isPresetMax) CinemaBlack else CinemaTextLight,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                softWrap = false
                             )
-                            .clickable {
-                                sliderValue = preset.toFloat()
-                                onMpSelected(preset)
-                            }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = label,
-                            color = if (isSel && isPresetMax) Color.Black else Color.White,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
+                        }
                     }
                 }
-            }
-
-            Spacer(modifier = Modifier.height(18.dp))
-
-            // Subtitle 2: Hardware Sensor Megapixel Stepper + Value display
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Sensor Megapixel Stepper",
-                    color = CinemaTextLight,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Text(
-                    text = String.format(java.util.Locale.US, "%.1f MP", sliderValue),
-                    color = AppleYellow,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    softWrap = false
-                )
-            }
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            // Stepper Slider from minBound to maxBound
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "${minBound.toInt()}M",
-                    color = CinemaTextLight,
-                    fontSize = 10.sp
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Slider(
-                    value = sliderValue.coerceIn(minBound, maxBound),
-                    onValueChange = {
-                        sliderValue = it
-                    },
-                    onValueChangeFinished = {
-                        onMpSelected(sliderValue.toDouble())
-                    },
-                    valueRange = minBound..maxBound,
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = AppleYellow,
-                        inactiveTrackColor = Color(0x33FFFFFF)
-                    ),
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "${maxMp.toInt().coerceAtLeast(1)}M",
-                    color = CinemaTextLight,
-                    fontSize = 10.sp
-                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
+
+            CommixSectionCard(title = "Sensor Megapixel Stepper") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "Target Capture Resolution",
+                        color = CinemaTextDim,
+                        fontSize = 11.5.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        text = String.format(Locale.US, "%.1f MP", sliderValue),
+                        color = AppleYellow,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 15.sp,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "${minBound.toInt()}M",
+                        color = CinemaTextDim,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Slider(
+                        value = sliderValue.coerceIn(minBound, maxBound),
+                        onValueChange = { sliderValue = it },
+                        onValueChangeFinished = { onMpSelected(sliderValue.toDouble()) },
+                        valueRange = minBound..maxBound,
+                        colors = commixSliderColors(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "${maxMp.toInt().coerceAtLeast(1)}M",
+                        color = CinemaTextDim,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
         }
     }
 }

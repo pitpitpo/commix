@@ -11,9 +11,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.txor.commix.ui.theme.AppleYellow
@@ -28,11 +28,11 @@ fun FocusRing(
     animationsEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val scale = remember { Animatable(if (animationsEnabled) 1.4f else 1.0f) }
+    val scale = remember { Animatable(if (animationsEnabled) 1.35f else 1.0f) }
 
     LaunchedEffect(x, y, animationsEnabled) {
         if (animationsEnabled) {
-            scale.snapTo(1.4f)
+            scale.snapTo(1.35f)
             scale.animateTo(
                 targetValue = 1.0f,
                 animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
@@ -42,8 +42,8 @@ fun FocusRing(
         }
     }
 
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val halfSizePx = with(density) { 40.dp.roundToPx() }
+    val density = LocalDensity.current
+    val halfSizePx = with(density) { 46.dp.roundToPx() }
 
     val currentOnEvChanged by rememberUpdatedState(onEvChanged)
     var accumulatedEv by remember(x, y) { mutableFloatStateOf(evStops) }
@@ -51,7 +51,7 @@ fun FocusRing(
     Box(
         modifier = modifier
             .offset { IntOffset((x - halfSizePx).roundToInt(), (y - halfSizePx).roundToInt()) }
-            .size(80.dp)
+            .size(92.dp)
             .pointerInput(x, y) {
                 detectVerticalDragGestures { _, dragAmount ->
                     accumulatedEv = (accumulatedEv - (dragAmount / 50.0f)).coerceIn(-2.0f, 2.0f)
@@ -59,40 +59,37 @@ fun FocusRing(
                 }
             }
     ) {
-        Canvas(modifier = Modifier.size(80.dp)) {
-            val radius = 35f * scale.value
+        Canvas(modifier = Modifier.size(92.dp)) {
+            val radius = 26.dp.toPx() * scale.value
             val center = Offset(size.width / 2f, size.height / 2f)
+            val strokePx = 1.6.dp.toPx()
 
-            // Outer focus circle / square
             drawCircle(
                 color = AppleYellow,
                 radius = radius,
                 center = center,
-                style = Stroke(width = 2f)
+                style = Stroke(width = strokePx)
             )
 
-            // Small 4 corner indicator ticks
-            val tickLen = 8f
-            drawLine(AppleYellow, Offset(center.x - radius, center.y), Offset(center.x - radius + tickLen, center.y), 2f)
-            drawLine(AppleYellow, Offset(center.x + radius, center.y), Offset(center.x + radius - tickLen, center.y), 2f)
-            drawLine(AppleYellow, Offset(center.x, center.y - radius), Offset(center.x, center.y - radius + tickLen), 2f)
-            drawLine(AppleYellow, Offset(center.x, center.y + radius), Offset(center.x, center.y + radius - tickLen), 2f)
+            val tickLen = 5.5.dp.toPx()
+            drawLine(AppleYellow, Offset(center.x - radius, center.y), Offset(center.x - radius + tickLen, center.y), strokePx)
+            drawLine(AppleYellow, Offset(center.x + radius, center.y), Offset(center.x + radius - tickLen, center.y), strokePx)
+            drawLine(AppleYellow, Offset(center.x, center.y - radius), Offset(center.x, center.y - radius + tickLen), strokePx)
+            drawLine(AppleYellow, Offset(center.x, center.y + radius), Offset(center.x, center.y + radius - tickLen), strokePx)
 
-            // EV bias slider line and sun icon on the right
-            val sunX = center.x + radius + 18f
-            val sunY = center.y - (evStops / 2.0f) * radius
+            val sunX = center.x + radius + 12.dp.toPx()
+            val sunY = center.y - (evStops / 2.0f).coerceIn(-1f, 1f) * radius
 
             drawLine(
-                color = Color(0x66FFCC00),
+                color = AppleYellow.copy(alpha = 0.45f),
                 start = Offset(sunX, center.y - radius),
                 end = Offset(sunX, center.y + radius),
-                strokeWidth = 1.5f
+                strokeWidth = 1.2.dp.toPx()
             )
 
-            // Sun icon (small circle with rays)
             drawCircle(
                 color = AppleYellow,
-                radius = 5f,
+                radius = 3.8.dp.toPx(),
                 center = Offset(sunX, sunY)
             )
         }

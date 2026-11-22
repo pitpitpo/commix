@@ -11,7 +11,9 @@ import android.util.Log
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.asin
 import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.sqrt
 
 data class ImuSample(
@@ -25,8 +27,20 @@ data class ImuSample(
 )
 
 /**
+ * Gimbal-lock-free camera attitude in upright shooting coordinates:
+ * - [azimuthDeg]: rear camera compass heading in [-180, 180], increasing clockwise (panning right)
+ * - [pitchDeg]: optical elevation in [-90, 90] (0° = horizon, + = tilted up, - = tilted down)
+ * - [rollDeg]: horizon roll in [-180, 180] (0° = upright level portrait, + = tilted clockwise)
+ */
+data class CameraAttitude(
+    val azimuthDeg: Double,
+    val pitchDeg: Double,
+    val rollDeg: Double
+)
+
+/**
  * SensorHub manages 6-axis IMU sampling synchronized to Camera2 frame timestamps,
- * providing data for real-time electronic stabilization and Gyroflow motion logging.
+ * providing data for real-time electronic stabilization, panorama guidance, and Gyroflow logging.
  */
 class SensorHub(private val context: Context, private val onOrientationChanged: (Map<String, Double>) -> Unit) {
     private val TAG = "CommixSensorHub"
@@ -37,12 +51,13 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
     private var lastOrientationMs = 0L
 
     private val rotationMatrix = FloatArray(9)
-    private val orientationAngles = FloatArray(3)
+    @Volatile private var hasRotationMatrix = false
 
     // Current synchronized values
     @Volatile var currentPitchDeg = 0.0
     @Volatile var currentRollDeg = 0.0
     @Volatile var currentAzimuthDeg = 0.0
+    @Volatile var currentYawRateDegPerSec = 0.0
     @Volatile var lastGyroMagnitudeRadSec: Float = 0f
     @Volatile var onGyroVelocity: ((Float) -> Unit)? = null
 
@@ -78,6 +93,13 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
                     val gz = event.values[2]
                     val mag = sqrt(gx * gx + gy * gy + gz * gz)
                     lastGyroMagnitudeRadSec = mag
+                    if (hasRotationMatrix) {
+                        val rawYawDegSec = computeWorldYawRateDegPerSec(rotationMatrix, gx, gy, gz)
+                        currentYawRateDegPerSec = currentYawRateDegPerSec * 0.65 + rawYawDegSec * 0.35
+                    } else {
+                        val rawYawDegSec = Math.toDegrees((-gy).toDouble())
+                        currentYawRateDegPerSec = currentYawRateDegPerSec * 0.65 + rawYawDegSec * 0.35
+                    }
                     onGyroVelocity?.invoke(mag)
                     if (com.txor.commix.bridge.NativeEngineBridge.isLoaded) {
                         com.txor.commix.bridge.NativeEngineBridge.nativePushBestShotVelocity(gx, gy, gz)
@@ -91,23 +113,31 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
 
                 if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
-                    SensorManager.getOrientation(rotationMatrix, orientationAngles)
-                    val az = Math.toDegrees(orientationAngles[0].toDouble())
-                    val pi = Math.toDegrees(orientationAngles[1].toDouble())
-                    val ro = Math.toDegrees(orientationAngles[2].toDouble())
-                    currentAzimuthDeg = az
-                    currentPitchDeg = pi
-                    currentRollDeg = ro
-                    onOrientationChanged(mapOf("pitch" to pi, "roll" to ro, "azimuth" to az))
+                    hasRotationMatrix = true
+                    val attitude = computeCameraOrientationDeg(rotationMatrix)
+                    currentAzimuthDeg = attitude.azimuthDeg
+                    currentPitchDeg = attitude.pitchDeg
+                    currentRollDeg = attitude.rollDeg
+                    onOrientationChanged(
+                        mapOf(
+                            "pitch" to attitude.pitchDeg,
+                            "roll" to attitude.rollDeg,
+                            "azimuth" to attitude.azimuthDeg,
+                            "yawRateDegSec" to currentYawRateDegPerSec
+                        )
+                    )
                 } else if (event.sensor.type == Sensor.TYPE_ACCELEROMETER || event.sensor.type == Sensor.TYPE_GRAVITY) {
-                    val ax = event.values[0]
-                    val ay = event.values[1]
-                    val az = event.values[2]
-                    val pi = Math.toDegrees(atan2(ay.toDouble(), sqrt(ax * ax + az * az).toDouble()))
-                    val ro = Math.toDegrees(atan2(-ax.toDouble(), az.toDouble()))
-                    currentPitchDeg = pi
-                    currentRollDeg = ro
-                    onOrientationChanged(mapOf("pitch" to pi, "roll" to ro, "azimuth" to 0.0))
+                    val attitude = computeGravityAttitudeDeg(event.values[0], event.values[1], event.values[2])
+                    currentPitchDeg = attitude.pitchDeg
+                    currentRollDeg = attitude.rollDeg
+                    onOrientationChanged(
+                        mapOf(
+                            "pitch" to attitude.pitchDeg,
+                            "roll" to attitude.rollDeg,
+                            "azimuth" to currentAzimuthDeg,
+                            "yawRateDegSec" to currentYawRateDegPerSec
+                        )
+                    )
                 }
             }
 
@@ -259,6 +289,77 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
 
     companion object {
         /**
+         * Computes upright rear-camera attitude from Android's 3x3 row-major device->world
+         * rotation matrix (East=+X, North=+Y, Sky=+Z) without portrait gimbal lock.
+         *
+         * Rear camera forward vector is device -Z = (-R[2], -R[5], -R[8]).
+         * When holding the phone upright facing the horizon:
+         * - pitchDeg == 0° (+ = looking up, - = looking down)
+         * - rollDeg  == 0° (+ = tilted clockwise, - = counter-clockwise)
+         * - azimuthDeg in [-180°, 180°], increasing clockwise when panning right
+         */
+        fun computeCameraOrientationDeg(r: FloatArray): CameraAttitude {
+            if (r.size < 9) return CameraAttitude(0.0, 0.0, 0.0)
+            val fx = -r[2].toDouble()
+            val fy = -r[5].toDouble()
+            val fz = (-r[8].toDouble()).coerceIn(-1.0, 1.0)
+
+            val pitchDeg = Math.toDegrees(asin(fz))
+
+            // Heading: use optical forward projection on horizontal plane; near zenith/nadir fall back to screen-up (+Y)
+            val horizLen = hypot(fx, fy)
+            val azimuthDeg = if (horizLen > 0.08) {
+                Math.toDegrees(atan2(fx, fy))
+            } else {
+                Math.toDegrees(atan2(r[1].toDouble(), r[4].toDouble()))
+            }
+
+            // Horizon roll: screen right (+X) vertical component is R[6], screen up (+Y) vertical component is R[7]
+            val rollLen = hypot(r[6].toDouble(), r[7].toDouble())
+            val rollDeg = if (rollLen > 0.1) {
+                Math.toDegrees(atan2(-r[6].toDouble(), r[7].toDouble()))
+            } else {
+                0.0
+            }
+
+            return CameraAttitude(
+                azimuthDeg = azimuthDeg,
+                pitchDeg = pitchDeg,
+                rollDeg = rollDeg
+            )
+        }
+
+        /**
+         * Gravity/accelerometer fallback in the exact same upright camera frame
+         * (pitch=0° at horizon, roll=0° when level portrait).
+         */
+        fun computeGravityAttitudeDeg(ax: Float, ay: Float, az: Float): CameraAttitude {
+            val g = sqrt((ax * ax + ay * ay + az * az).toDouble())
+            if (g < 1e-3) return CameraAttitude(0.0, 0.0, 0.0)
+            val fz = (-az.toDouble() / g).coerceIn(-1.0, 1.0)
+            val pitchDeg = Math.toDegrees(asin(fz))
+            val rollLen = hypot(ax.toDouble(), ay.toDouble())
+            val rollDeg = if (rollLen > 0.5) {
+                Math.toDegrees(atan2(-ax.toDouble(), ay.toDouble()))
+            } else {
+                0.0
+            }
+            return CameraAttitude(azimuthDeg = 0.0, pitchDeg = pitchDeg, rollDeg = rollDeg)
+        }
+
+        /**
+         * Projects device-frame angular velocity (rad/s) onto World Up (R[6], R[7], R[8])
+         * to get signed horizontal pan speed in deg/s (+ = panning right/clockwise, - = left).
+         */
+        fun computeWorldYawRateDegPerSec(r: FloatArray, gx: Float, gy: Float, gz: Float): Double {
+            if (r.size < 9) return Math.toDegrees((-gy).toDouble())
+            val worldUpDotGyro = gx.toDouble() * r[6].toDouble() +
+                gy.toDouble() * r[7].toDouble() +
+                gz.toDouble() * r[8].toDouble()
+            return Math.toDegrees(-worldUpDotGyro)
+        }
+
+        /**
          * Gyroflow `.gcsv` exporter — format per
          * https://docs.gyroflow.xyz/app/technical-details/gcsv-format
          *
@@ -283,7 +384,13 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
 
         private const val IMU_LOG_MAX_SAMPLES = 30_000
 
-        fun exportGyroflowGcsv(file: File, samples: List<ImuSample>, videoFilename: String? = null) {
+        fun exportGyroflowGcsv(
+            file: File,
+            samples: List<ImuSample>,
+            videoFilename: String? = null,
+            cameraName: String? = null,
+            frameReadoutTimeMs: Double = 0.0
+        ) {
             file.parentFile?.mkdirs()
             file.bufferedWriter().use { writer ->
                 writer.write(GYROFLOW_HEADER)
@@ -291,8 +398,14 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
                 writer.write(GYROFLOW_ID)
                 writer.write(GYROFLOW_ORIENTATION)
                 writer.write(GYROFLOW_VENDOR)
+                if (!cameraName.isNullOrBlank()) {
+                    writer.write("camera_name,$cameraName\n")
+                }
                 if (!videoFilename.isNullOrBlank()) {
                     writer.write("videofilename,$videoFilename\n")
+                }
+                if (frameReadoutTimeMs > 0.0) {
+                    writer.write(String.format(java.util.Locale.US, "frame_readout_time,%.2f\n", frameReadoutTimeMs))
                 }
                 // Android reports gyro in rad/s and accelerometer in m/s^2 — the
                 // units Gyroflow expects — so the file declares unit scales and the
@@ -316,6 +429,14 @@ class SensorHub(private val context: Context, private val onOrientationChanged: 
         }
     }
 
-    fun exportGyroflowGcsv(file: File, samples: List<ImuSample>, videoFilename: String? = null) =
-        Companion.exportGyroflowGcsv(file, samples, videoFilename)
+    val hasGyroscopeSensor: Boolean
+        get() = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE) != null
+
+    fun exportGyroflowGcsv(
+        file: File,
+        samples: List<ImuSample>,
+        videoFilename: String? = null,
+        cameraName: String? = null,
+        frameReadoutTimeMs: Double = 0.0
+    ) = Companion.exportGyroflowGcsv(file, samples, videoFilename, cameraName, frameReadoutTimeMs)
 }

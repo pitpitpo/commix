@@ -49,31 +49,61 @@ class AudioEngine(private val context: Context) {
         lowCutEnabled = enabled
     }
 
+    fun hasAudioPermission(): Boolean {
+        return try {
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context,
+                android.Manifest.permission.RECORD_AUDIO
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     @android.annotation.SuppressLint("MissingPermission")
-    fun startAudioMonitoring() {
-        if (isMonitoringAudio) return
+    fun startAudioMonitoring(): Boolean {
+        if (isMonitoringAudio) return true
+        if (!hasAudioPermission()) {
+            Log.w(TAG, "RECORD_AUDIO permission not granted; skipping audio monitoring")
+            return false
+        }
         val channelConfig = android.media.AudioFormat.CHANNEL_IN_MONO
         val audioFormat = android.media.AudioFormat.ENCODING_PCM_16BIT
         val minBuf = android.media.AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
         if (minBuf <= 0) {
             Log.w(TAG, "Audio hardware does not support mono $sampleRate Hz")
-            return
+            return false
         }
         val bufferSize = minBuf.coerceAtLeast(2048)
 
         try {
-            audioRecord = android.media.AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSize
-            )
+            var candidate = try {
+                android.media.AudioRecord(
+                    MediaRecorder.AudioSource.CAMCORDER,
+                    sampleRate,
+                    channelConfig,
+                    audioFormat,
+                    bufferSize
+                )
+            } catch (_: Throwable) {
+                null
+            }
+            if (candidate == null || candidate.state != android.media.AudioRecord.STATE_INITIALIZED) {
+                try { candidate?.release() } catch (_: Throwable) {}
+                candidate = android.media.AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    sampleRate,
+                    channelConfig,
+                    audioFormat,
+                    bufferSize
+                )
+            }
+            audioRecord = candidate
             if (audioRecord?.state != android.media.AudioRecord.STATE_INITIALIZED) {
                 Log.w(TAG, "AudioRecord failed to initialize")
                 try { audioRecord?.release() } catch (_: Throwable) {}
                 audioRecord = null
-                return
+                return false
             }
             audioRecord?.startRecording()
             isMonitoringAudio = true
@@ -133,11 +163,13 @@ class AudioEngine(private val context: Context) {
                 name = "CommixAudioMonitor"
                 start()
             }
+            return true
         } catch (e: Throwable) {
             Log.w(TAG, "Audio monitoring error: ${e.message}")
             try { audioRecord?.release() } catch (_: Throwable) {}
             audioRecord = null
             isMonitoringAudio = false
+            return false
         }
     }
 

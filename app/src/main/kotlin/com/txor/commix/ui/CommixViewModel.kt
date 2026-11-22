@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.media.AudioManager
 import android.media.ToneGenerator
@@ -16,7 +17,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.txor.commix.CaptureRequestFactory
 import com.txor.commix.CaptureRequestParams
+import com.txor.commix.PanoramaGuidanceSeverity
+import com.txor.commix.PanoramaRawSlice
 import com.txor.commix.PanoramaStitcher
+import com.txor.commix.PanoramaSweepTracker
 import com.txor.commix.PhotoFormatEngine
 import com.txor.commix.PipelineThroughputEngine
 import com.txor.commix.ProcessingJobQueue
@@ -31,6 +35,7 @@ import com.txor.commix.data.CommixRepository
 import com.txor.commix.model.CameraUiState
 import com.txor.commix.model.ShotMetadata
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,8 +55,14 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
+    // Live filmstrip preview thumbnails shown inside the Panorama ribbon during capture
+    // (stored in a dedicated flow to keep CameraUiState pure Kotlin for JVM tests)
+    private val _panoramaPreviewStrip = MutableStateFlow<List<Bitmap>>(emptyList())
+    val panoramaPreviewStrip: StateFlow<List<Bitmap>> = _panoramaPreviewStrip.asStateFlow()
+
     private var activeSurface: Surface? = null
     private var activeSurfaceTexture: SurfaceTexture? = null
+    private var captureTimeoutJob: Job? = null
 
     private val batteryReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -125,6 +136,8 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         repository.onPhotoSaved = { uri ->
+            captureTimeoutJob?.cancel()
+            captureTimeoutJob = null
             _uiState.update { it.copy(recentThumbnailPath = uri.toString(), lastSavedUriString = uri.toString(), isCapturing = false) }
         }
 
@@ -136,10 +149,26 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
             val cur = _uiState.value
             if (cur.isSpatialCapturing) {
                 onSpatialSliceCaptured(bytes)
+            } else if (cur.isPanoramaCapturing) {
+                onPanoramaSliceArrived(bytes)
+            }
+        }
+
+        repository.onPanoramaSliceFailed = {
+            if (_uiState.value.isSpatialCapturing) {
+                synchronized(pendingSpatialPoses) {
+                    if (pendingSpatialPoses.isNotEmpty()) {
+                        pendingSpatialPoses.removeFirst()
+                    }
+                }
+                spatialCaptureInFlight = false
             } else {
-                val az = cur.azimuthDeg
-                panoramaSlices.add(bytes to az)
-                _uiState.update { it.copy(panoramaCapturedFrames = panoramaSlices.size) }
+                synchronized(pendingPanoramaPoses) {
+                    if (pendingPanoramaPoses.isNotEmpty()) {
+                        pendingPanoramaPoses.removeFirst()
+                    }
+                }
+                panoramaCaptureInFlight = false
             }
         }
 
@@ -147,16 +176,24 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
             val pitch = map["pitch"] ?: 0.0
             val roll = map["roll"] ?: 0.0
             val azimuth = map["azimuth"] ?: 0.0
+            val yawRateDegSec = map["yawRateDegSec"] ?: 0.0
             _uiState.update { it.copy(pitchDeg = pitch.toFloat(), rollDeg = roll.toFloat(), azimuthDeg = azimuth.toFloat()) }
             val cur = _uiState.value
             if (cur.isPanoramaCapturing) {
-                processPanoramaOrientation(azimuth.toFloat(), pitch.toFloat(), roll.toFloat())
+                processPanoramaOrientation(
+                    azimuth = azimuth.toFloat(),
+                    pitch = pitch.toFloat(),
+                    roll = roll.toFloat(),
+                    yawRateDegSec = yawRateDegSec.toFloat()
+                )
             } else if (cur.isSpatialCapturing) {
                 processSpatialOrientation(azimuth.toFloat(), pitch.toFloat(), roll.toFloat())
             }
         }
 
         repository.onError = { msg ->
+            captureTimeoutJob?.cancel()
+            captureTimeoutJob = null
             videoTimerJob?.cancel()
             videoTimerJob = null
             recordingJob = null
@@ -221,6 +258,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     private var timeLapseJob: kotlinx.coroutines.Job? = null
     private var automationJob: kotlinx.coroutines.Job? = null
     private var selfTimerJob: kotlinx.coroutines.Job? = null
+    private var focusPullJob: kotlinx.coroutines.Job? = null
     @Volatile
     private var isForeground: Boolean = true
 
@@ -229,17 +267,44 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         repository.resumeCamera()
     }
 
-    fun onAppBackground() {
-        isForeground = false
+    private fun stopActiveCapturesForTransition() {
         selfTimerJob?.cancel()
         selfTimerJob = null
+        focusPullJob?.cancel()
+        focusPullJob = null
+        if (_uiState.value.isFocusPullRunning) {
+            _uiState.update { it.copy(isFocusPullRunning = false) }
+        }
         if (_uiState.value.isAutomationRunning || _uiState.value.automationListeningLabel != null) {
             stopAutomation()
-        } else if (_uiState.value.isSpatialCapturing) {
-            cancelSpatialCapture()
-        } else if (_uiState.value.isRecording) {
-            onShutterTapped()
         }
+        if (_uiState.value.isSpatialCapturing) {
+            cancelSpatialCapture()
+        }
+        if (_uiState.value.isPanoramaCapturing) {
+            cancelPanoramaCapture()
+        }
+        if (timeLapseJob?.isActive == true) {
+            timeLapseJob?.cancel()
+            timeLapseJob = null
+            _uiState.update { it.copy(isRecording = false, timeLapseFrames = 0) }
+        }
+        if (_uiState.value.isRecording) {
+            videoTimerJob?.cancel()
+            videoTimerJob = null
+            _uiState.update { it.copy(isRecording = false, recordingSeconds = 0) }
+            val priorJob = recordingJob
+            recordingJob = null
+            viewModelScope.launch(Dispatchers.Default) {
+                priorJob?.join()
+                repository.stopVideoRecording()
+            }
+        }
+    }
+
+    fun onAppBackground() {
+        isForeground = false
+        stopActiveCapturesForTransition()
         repository.sensorHub.onGyroVelocity = null
         repository.pauseCamera()
         _uiState.update { it.copy(ready = false, selfTimerCountdown = 0, automationListeningLabel = null) }
@@ -273,14 +338,26 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
             while (isActive) {
                 try {
-                    if (!isForeground || !com.txor.commix.bridge.NativeTelemetryBridge.isLoaded) {
+                    if (!isForeground) {
                         delay(250)
+                        continue
+                    }
+
+                    val curSnap = _uiState.value
+                    val needLumaGrid = curSnap.showZebras || curSnap.showFalseColor
+                    repository.lumaGridEnabled = needLumaGrid
+                    val liveGrid = if (needLumaGrid) repository.latestLumaGrid else FloatArray(0)
+
+                    if (!com.txor.commix.bridge.NativeTelemetryBridge.isLoaded) {
+                        if (needLumaGrid && liveGrid.isNotEmpty()) {
+                            _uiState.update { it.copy(lumaGrid = liveGrid) }
+                        }
+                        delay(66)
                         continue
                     }
 
                     // 1. Read live C++ seqlock telemetry (Scopes, Audio VU, IMU, Spot IRE, Vectorscope, AF & Focus Peak)
                     val hasTelemetry = com.txor.commix.bridge.NativeTelemetryBridge.nativeReadTelemetry(floats, luma, wave, vscope)
-                    val curSnap = _uiState.value
                     val needParade = curSnap.showRgbParade || curSnap.showScopes
                     val hasParade = if (hasTelemetry && needParade) {
                         com.txor.commix.bridge.NativeTelemetryBridge.nativeReadParade(paradeR, paradeG, paradeB)
@@ -318,6 +395,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                             paradeR = if (hasParade) paradeR.clone() else current.paradeR,
                             paradeG = if (hasParade) paradeG.clone() else current.paradeG,
                             paradeB = if (hasParade) paradeB.clone() else current.paradeB,
+                            lumaGrid = if (needLumaGrid && liveGrid.isNotEmpty()) liveGrid else if (!needLumaGrid && current.lumaGrid.isNotEmpty()) FloatArray(0) else current.lumaGrid,
                             bestShotScore = totalScore,
                             shouldShowShootNow = shouldShoot
                         )
@@ -331,9 +409,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onModeSelected(mode: String) {
         if (_uiState.value.activeMode == mode) return
-        if (_uiState.value.isSpatialCapturing) {
-            cancelSpatialCapture()
-        }
+        stopActiveCapturesForTransition()
         _uiState.update { cur ->
             val switched = cur.switchToMode(mode)
             if (mode == "SPATIAL") {
@@ -375,8 +451,16 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onFocusChanged(diopters: Float) {
-        _uiState.update { it.copy(focusDiopters = diopters) }
+        val clamped = if (diopters < 0f) -1.0f else diopters.coerceIn(0.0f, 15.0f)
+        _uiState.update { it.copy(focusDiopters = clamped) }
         updateRepositoryParams()
+    }
+
+    fun onStepFocusDiopters(delta: Float) {
+        val cur = _uiState.value
+        val base = if (cur.focusDiopters >= 0f) cur.focusDiopters else cur.afDistanceDiopters.coerceAtLeast(0f)
+        val next = (base + delta).coerceIn(0.0f, 15.0f)
+        onFocusChanged(next)
     }
 
     fun onZoomChanged(zoom: Double) {
@@ -434,7 +518,8 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                             bitrate = s.videoBitrateBps,
                             isVfDisabled = s.viewfinderDisabled,
                             targetFpsFloat = effectiveFpsFloat,
-                            isSlowMotion = isSlowMo
+                            isSlowMotion = isSlowMo,
+                            playbackFps = if (isSlowMo) s.slowMoPlaybackFps.toDouble() else 30.0
                         )
                     }
                 }
@@ -460,12 +545,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                 executeWithSelfTimer {
                     val cur = _uiState.value
                     _uiState.update { it.copy(isCapturing = true) }
-                    viewModelScope.launch {
-                        delay(6000)
-                        if (_uiState.value.isCapturing) {
-                            _uiState.update { it.copy(isCapturing = false) }
-                        }
-                    }
+                    armCaptureTimeout(12_000L)
                     repository.takeNightBurst(createShotMetadata(cur))
                 }
             }
@@ -474,12 +554,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                 executeWithSelfTimer {
                     val cur = _uiState.value
                     _uiState.update { it.copy(isCapturing = true) }
-                    viewModelScope.launch {
-                        delay(8000)
-                        if (_uiState.value.isCapturing) {
-                            _uiState.update { it.copy(isCapturing = false) }
-                        }
-                    }
+                    armCaptureTimeout(15_000L)
                     repository.takeLongExposureBurst(createShotMetadata(cur))
                 }
             }
@@ -492,12 +567,21 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update { it.copy(isRecording = true, timeLapseFrames = 0) }
                     timeLapseJob = viewModelScope.launch {
                         while (isActive) {
-                            val meta = createShotMetadata(_uiState.value)
+                            val snap = _uiState.value
+                            val meta = createShotMetadata(snap)
                             repository.takePicture(meta)
-                            _uiState.update { it.copy(timeLapseFrames = it.timeLapseFrames + 1) }
+                            val newCount = snap.timeLapseFrames + 1
+                            _uiState.update { it.copy(timeLapseFrames = newCount) }
+                            val limit = _uiState.value.timeLapseShotLimit
+                            if (limit > 0 && newCount >= limit) {
+                                _uiState.update { it.copy(isRecording = false) }
+                                showStatus("Intervalometer complete: $newCount/$limit frames")
+                                break
+                            }
                             val intervalMs = (_uiState.value.timeLapseIntervalSec.toDouble() * 1000.0).toLong().coerceAtLeast(500L)
                             delay(intervalMs)
                         }
+                        timeLapseJob = null
                     }
                 }
             }
@@ -513,14 +597,25 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                 executeWithSelfTimer {
                     val cur = _uiState.value
                     _uiState.update { it.copy(isCapturing = true) }
-                    viewModelScope.launch {
-                        delay(4000)
-                        if (_uiState.value.isCapturing) {
-                            _uiState.update { it.copy(isCapturing = false) }
-                        }
+                    val hasSpecialBurst = cur.aebEnabled || cur.focusStackEnabled || cur.multiExposureMode != "off"
+                    if (cur.burstShotCount >= 2 && !hasSpecialBurst) {
+                        armCaptureTimeout(12_000L)
+                        repository.takeContinuousBurst(createShotMetadata(cur), cur.burstShotCount)
+                    } else {
+                        armCaptureTimeout(6_000L)
+                        repository.takePicture(createShotMetadata(cur))
                     }
-                    repository.takePicture(createShotMetadata(cur))
                 }
+            }
+        }
+    }
+
+    private fun armCaptureTimeout(timeoutMs: Long) {
+        captureTimeoutJob?.cancel()
+        captureTimeoutJob = viewModelScope.launch {
+            delay(timeoutMs)
+            if (_uiState.value.isCapturing) {
+                _uiState.update { it.copy(isCapturing = false) }
             }
         }
     }
@@ -578,6 +673,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleHistogram() {
         _uiState.update { it.copy(showHistogram = !it.showHistogram) }
+        preferences.save(_uiState.value)
     }
 
     fun toggleWaveform() {
@@ -612,31 +708,37 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
     fun onToneCurveChanged(curve: String) {
         _uiState.update { it.copy(toneCurve = curve) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onFilmGrainChanged(grain: String) {
         _uiState.update { it.copy(filmGrain = grain) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onGrainIntensityChanged(intensity: Float) {
         _uiState.update { it.copy(grainIntensity = intensity.coerceIn(0f, 1f)) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onLutChanged(lut: String) {
         _uiState.update { it.copy(lutLook = lut) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onLutBlendChanged(blend: Float) {
         _uiState.update { it.copy(lutBlend = blend.coerceIn(0f, 1f)) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onWbTintChanged(tint: Float) {
         _uiState.update { it.copy(wbTint = tint.coerceIn(-50f, 50f)) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
@@ -698,6 +800,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     fun onSetFocusStackSlices(slices: Int) {
         val clamped = slices.coerceIn(3, 8)
         _uiState.update { it.copy(focusStackSlices = clamped) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
@@ -781,6 +884,31 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun updateRepositoryParams() {
         val s = _uiState.value
+        val activeCam = s.availableCameras.find { it.cameraId == s.activeCameraId }
+        val previewPlan = com.txor.commix.StabilizationPolicyEngine.resolve(
+            engineModeRaw = s.stabilizationEngineMode,
+            applyWhenRaw = s.stabilizationApplyWhen,
+            phase = if (s.isRecording) com.txor.commix.StabilizationPolicyEngine.CapturePhase.VIDEO_RECORDING
+            else com.txor.commix.StabilizationPolicyEngine.CapturePhase.PREVIEW,
+            activeCameraMode = s.activeMode,
+            caps = com.txor.commix.StabilizationPolicyEngine.HardwareCapabilities(
+                hasOis = activeCam?.hasOis == true,
+                hasEis = activeCam?.hasEis == true,
+                hasPreviewStabilization = activeCam?.hasPreviewStabilization == true,
+                apiLevel = android.os.Build.VERSION.SDK_INT
+            ),
+            photoAutoLevelEnabled = s.photoAutoLevelEnabled,
+            gyroflowExportEnabled = s.gyroflowExportEnabled
+        )
+        if (s.stabilizationActiveLabel != previewPlan.activePipelineLabel || s.hasGyroSensor != repository.hasGyroSensor) {
+            _uiState.update {
+                it.copy(
+                    stabilizationActiveLabel = previewPlan.activePipelineLabel,
+                    hasGyroSensor = repository.hasGyroSensor
+                )
+            }
+        }
+
         val params = CaptureRequestParams(
             iso = s.iso,
             expNs = s.shutterNs,
@@ -791,8 +919,12 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
             wbTint = s.wbTint,
             zoom = s.zoomRatio,
             hardwareMaxDigitalZoom = s.hardwareMaxDigitalZoom,
-            oisMode = s.oisMode,
-            eisMode = s.eisMode,
+            oisMode = if (s.stabilizationEngineMode == com.txor.commix.StabilizationPolicyEngine.ENGINE_OFF) "off" else s.oisMode,
+            eisMode = if (s.stabilizationEngineMode == com.txor.commix.StabilizationPolicyEngine.ENGINE_OFF) "off" else s.eisMode,
+            stabilizationEngineMode = s.stabilizationEngineMode,
+            stabilizationApplyWhen = s.stabilizationApplyWhen,
+            photoAutoLevelEnabled = s.photoAutoLevelEnabled,
+            gyroflowExportEnabled = s.gyroflowExportEnabled,
             activeMode = s.activeMode,
             targetPhotoMp = s.targetPhotoMp,
             videoResolution = s.videoResolution,
@@ -968,14 +1100,294 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onCycleEis() {
-        val nextEis = when (_uiState.value.eisMode) {
-            "off" -> "standard"
-            "standard" -> "super_steady"
-            "super_steady" -> "legend"
-            else -> "off"
+        onCycleStabilizationEngineMode()
+    }
+
+    fun onSetStabilizationEngineMode(mode: String) {
+        val norm = com.txor.commix.StabilizationPolicyEngine.normalizeEngineMode(mode)
+        val mappedEis = when (norm) {
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_OFF -> "off"
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_HARDWARE_OIS -> "off"
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_SOFTWARE_EIS -> "standard"
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_GYRO_POST -> "off"
+            else -> "legend"
         }
-        _uiState.update { it.copy(eisMode = nextEis) }
+        val mappedOis = when (norm) {
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_OFF,
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_SOFTWARE_EIS,
+            com.txor.commix.StabilizationPolicyEngine.ENGINE_GYRO_POST -> "off"
+            else -> "standard"
+        }
+        _uiState.update {
+            it.copy(
+                stabilizationEngineMode = norm,
+                eisMode = mappedEis,
+                oisMode = mappedOis
+            )
+        }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
+        val label = com.txor.commix.StabilizationPolicyEngine.formatEngineShort(norm)
+        val whenLabel = com.txor.commix.StabilizationPolicyEngine.formatTimingShort(_uiState.value.stabilizationApplyWhen)
+        showStatus("Stabilization: $label ($whenLabel)")
+    }
+
+    fun onCycleStabilizationEngineMode() {
+        val modes = com.txor.commix.StabilizationPolicyEngine.ALL_ENGINE_MODES.map { it.first }
+        val cur = com.txor.commix.StabilizationPolicyEngine.normalizeEngineMode(_uiState.value.stabilizationEngineMode)
+        val idx = modes.indexOf(cur)
+        val next = modes[(idx + 1) % modes.size]
+        onSetStabilizationEngineMode(next)
+    }
+
+    fun onSetStabilizationApplyWhen(timing: String) {
+        val norm = com.txor.commix.StabilizationPolicyEngine.normalizeApplyWhen(timing)
+        _uiState.update { it.copy(stabilizationApplyWhen = norm) }
+        preferences.save(_uiState.value)
+        updateRepositoryParams()
+        showStatus("Stabilization Applied: ${com.txor.commix.StabilizationPolicyEngine.formatTimingShort(norm)}")
+    }
+
+    fun onCycleStabilizationApplyWhen() {
+        val timings = com.txor.commix.StabilizationPolicyEngine.ALL_APPLY_TIMINGS.map { it.first }
+        val cur = com.txor.commix.StabilizationPolicyEngine.normalizeApplyWhen(_uiState.value.stabilizationApplyWhen)
+        val next = timings[(timings.indexOf(cur) + 1) % timings.size]
+        onSetStabilizationApplyWhen(next)
+    }
+
+    fun onTogglePhotoAutoLevel() {
+        val next = !_uiState.value.photoAutoLevelEnabled
+        _uiState.update { it.copy(photoAutoLevelEnabled = next) }
+        preferences.save(_uiState.value)
+        updateRepositoryParams()
+        showStatus(if (next) "Photo Auto-Level Horizon ON (±20°)" else "Photo Auto-Level OFF")
+    }
+
+    fun onToggleGyroflowExport() {
+        val next = !_uiState.value.gyroflowExportEnabled
+        _uiState.update { it.copy(gyroflowExportEnabled = next) }
+        preferences.save(_uiState.value)
+        updateRepositoryParams()
+        showStatus(if (next) "Gyroflow .gcsv Sidecar Export ON" else "Gyroflow .gcsv Export OFF")
+    }
+
+    // ── Exposure Assists (Zebras, False Color, Safe Area Guides) ─────────────────────────────
+    fun onToggleZebras() {
+        val next = !_uiState.value.showZebras
+        _uiState.update { it.copy(showZebras = next) }
+        preferences.save(_uiState.value)
+        showStatus(if (next) "Zebras ON (≥${_uiState.value.zebraThresholdIre}% IRE)" else "Zebras OFF")
+    }
+
+    fun onSetZebraThreshold(ire: Int) {
+        val clamped = ire.coerceIn(70, 100)
+        _uiState.update { it.copy(zebraThresholdIre = clamped, showZebras = true) }
+        preferences.save(_uiState.value)
+        showStatus("Zebra Threshold: ${clamped}% IRE")
+    }
+
+    fun onCycleZebraThreshold() {
+        val next = when (_uiState.value.zebraThresholdIre) {
+            70 -> 85
+            85 -> 95
+            95 -> 100
+            else -> 70
+        }
+        onSetZebraThreshold(next)
+    }
+
+    fun onToggleFalseColor() {
+        val next = !_uiState.value.showFalseColor
+        _uiState.update { it.copy(showFalseColor = next) }
+        preferences.save(_uiState.value)
+        showStatus(if (next) "False Color Exposure Map ON" else "False Color OFF")
+    }
+
+    fun onToggleSafeAreaGuides() {
+        val next = !_uiState.value.showSafeAreaGuides
+        _uiState.update { it.copy(showSafeAreaGuides = next) }
+        preferences.save(_uiState.value)
+        showStatus(if (next) "Broadcast Safe-Area Guides ON" else "Safe-Area Guides OFF")
+    }
+
+    // ── Motorized Cinema Focus Pull A ↔ B ────────────────────────────────────────────────────
+    fun onSetFocusPointA() {
+        val cur = _uiState.value
+        val diopters = if (cur.focusDiopters >= 0f) cur.focusDiopters else cur.afDistanceDiopters.coerceAtLeast(0f)
+        _uiState.update { it.copy(focusPointA = diopters, focusDiopters = diopters) }
+        updateRepositoryParams()
+        showStatus(String.format(java.util.Locale.US, "Focus Point A locked: %.2f D", diopters))
+    }
+
+    fun onSetFocusPointB() {
+        val cur = _uiState.value
+        val diopters = if (cur.focusDiopters >= 0f) cur.focusDiopters else cur.afDistanceDiopters.coerceAtLeast(0f)
+        _uiState.update { it.copy(focusPointB = diopters, focusDiopters = diopters) }
+        updateRepositoryParams()
+        showStatus(String.format(java.util.Locale.US, "Focus Point B locked: %.2f D", diopters))
+    }
+
+    fun onClearFocusPullPoints() {
+        focusPullJob?.cancel()
+        focusPullJob = null
+        _uiState.update { it.copy(focusPointA = null, focusPointB = null, isFocusPullRunning = false) }
+        showStatus("Focus Pull A/B Cleared")
+    }
+
+    fun onSetFocusPullDuration(durationSec: Float) {
+        val clamped = durationSec.coerceIn(0.5f, 8.0f)
+        _uiState.update { it.copy(focusPullDurationSec = clamped) }
+        preferences.save(_uiState.value)
+    }
+
+    fun onTriggerFocusPull(toPointB: Boolean) {
+        val s = _uiState.value
+        val ptA = s.focusPointA
+        val ptB = s.focusPointB
+        if (ptA == null || ptB == null) {
+            showStatus("Set both Focus Point A and Point B first")
+            return
+        }
+        val startD = if (toPointB) ptA else ptB
+        val endD = if (toPointB) ptB else ptA
+        val durationMs = (s.focusPullDurationSec * 1000f).toLong().coerceIn(500L, 8000L)
+
+        focusPullJob?.cancel()
+        _uiState.update { it.copy(isFocusPullRunning = true, focusDiopters = startD) }
+        updateRepositoryParams()
+
+        focusPullJob = viewModelScope.launch {
+            try {
+                val startTime = System.currentTimeMillis()
+                while (isActive) {
+                    val elapsed = System.currentTimeMillis() - startTime
+                    val t = (elapsed.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+                    val d = com.txor.commix.StabilizationPolicyEngine.evaluateFocusPullDiopters(startD, endD, t)
+                    _uiState.update { it.copy(focusDiopters = d) }
+                    updateRepositoryParams()
+                    if (t >= 1f) break
+                    delay(16L)
+                }
+            } finally {
+                _uiState.update { it.copy(isFocusPullRunning = false) }
+                focusPullJob = null
+            }
+        }
+    }
+
+    // ── Custom Pro Memory Presets (C1 / C2 / C3) ─────────────────────────────────────────────
+    fun onSaveCustomPreset(slot: Int) {
+        val s = _uiState.value
+        val preset = com.txor.commix.model.CustomRigPreset(
+            slot = slot,
+            iso = s.iso,
+            shutterNs = s.shutterNs,
+            evStops = s.evStops,
+            wbKelvin = s.wbKelvin,
+            wbTint = s.wbTint,
+            focusDiopters = s.focusDiopters,
+            toneCurve = s.toneCurve,
+            lutLook = s.lutLook,
+            photoFormat = s.photoFormat,
+            stabilizationEngineMode = s.stabilizationEngineMode,
+            stabilizationApplyWhen = s.stabilizationApplyWhen,
+            isProcessZero = s.isProcessZeroActive
+        )
+        preferences.saveCustomPreset(preset)
+        _uiState.update {
+            it.copy(
+                savedCustomSlots = it.savedCustomSlots + slot,
+                activeCustomSlot = slot
+            )
+        }
+        showStatus("Saved Rig to Custom Preset C$slot")
+    }
+
+    fun onLoadCustomPreset(slot: Int) {
+        val preset = preferences.loadCustomPreset(slot)
+        if (preset == null) {
+            onSaveCustomPreset(slot)
+            return
+        }
+        _uiState.update {
+            it.copy(
+                iso = preset.iso,
+                shutterNs = preset.shutterNs,
+                evStops = preset.evStops,
+                wbKelvin = preset.wbKelvin,
+                wbTint = preset.wbTint,
+                focusDiopters = preset.focusDiopters,
+                toneCurve = preset.toneCurve,
+                lutLook = preset.lutLook,
+                photoFormat = preset.photoFormat,
+                stabilizationEngineMode = preset.stabilizationEngineMode,
+                stabilizationApplyWhen = preset.stabilizationApplyWhen,
+                isProcessZeroActive = preset.isProcessZero,
+                activeCustomSlot = slot
+            )
+        }
+        preferences.save(_uiState.value)
+        updateRepositoryParams()
+        showStatus("Loaded Custom Preset C$slot")
+    }
+
+    // ── Mode-Specific Market Pro Features ────────────────────────────────────────────────────
+    fun onCycleBurstShotCount() {
+        val next = when (_uiState.value.burstShotCount) {
+            0 -> 3
+            3 -> 5
+            5 -> 10
+            else -> 0
+        }
+        onSetBurstShotCount(next)
+    }
+
+    fun onSetBurstShotCount(count: Int) {
+        val safe = if (count in listOf(0, 3, 5, 10)) count else 0
+        _uiState.update { it.copy(burstShotCount = safe) }
+        preferences.save(_uiState.value)
+        showStatus(if (safe == 0) "Single Shot Mode" else "High-Speed Burst: ${safe}× Shots")
+    }
+
+    fun onCycleSlowMoPlaybackFps() {
+        val next = when (_uiState.value.slowMoPlaybackFps) {
+            24 -> 30
+            30 -> 60
+            else -> 24
+        }
+        onSetSlowMoPlaybackFps(next)
+    }
+
+    fun onSetSlowMoPlaybackFps(fps: Int) {
+        val safe = if (fps in listOf(24, 30, 60)) fps else 30
+        _uiState.update { it.copy(slowMoPlaybackFps = safe) }
+        preferences.save(_uiState.value)
+        showStatus("Slow-Mo Playback: ${safe} FPS")
+    }
+
+    fun onCycleTimeLapseShotLimit() {
+        val next = when (_uiState.value.timeLapseShotLimit) {
+            0 -> 60
+            60 -> 150
+            150 -> 300
+            300 -> 600
+            else -> 0
+        }
+        onSetTimeLapseShotLimit(next)
+    }
+
+    fun onSetTimeLapseShotLimit(limit: Int) {
+        val safe = limit.coerceAtLeast(0)
+        _uiState.update { it.copy(timeLapseShotLimit = safe) }
+        preferences.save(_uiState.value)
+        showStatus(if (safe == 0) "Intervalometer: Unlimited" else "Intervalometer Limit: $safe frames")
+    }
+
+    fun onToggleNightRedUi() {
+        val next = !_uiState.value.nightRedUiEnabled
+        _uiState.update { it.copy(nightRedUiEnabled = next) }
+        preferences.save(_uiState.value)
+        showStatus(if (next) "Astrophotography Red Vision ON" else "Red Vision OFF")
     }
 
     fun onToggleRaw() {
@@ -1061,6 +1473,9 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                 videoFps = clampedFps.toInt()
             )
         }
+        preferences.save(_uiState.value)
+        updateStorageTelemetry()
+        showStatus("Video Resolution: $nextRes")
     }
 
     fun onCycleFps() {
@@ -1100,6 +1515,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         } else {
             showStatus("Shutter Angle Unlocked")
         }
+        preferences.save(_uiState.value)
     }
 
     fun onNdFilterChanged(filter: String) {
@@ -1113,17 +1529,21 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
             else -> 0.0f
         }
         _uiState.update { it.copy(ndFilter = filter, evStops = evDrop) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
         showStatus("e-ND: ${filter.uppercase()} ($evDrop EV)")
     }
 
     fun onAnamorphicChanged(ratio: Float) {
         _uiState.update { it.copy(anamorphicRatio = ratio) }
+        preferences.save(_uiState.value)
+        updateRepositoryParams()
         showStatus(if (ratio == 1.0f) "Anamorphic De-Squeeze: Off" else "Anamorphic De-Squeeze: ${ratio}×")
     }
 
     fun onAebChanged(enabled: Boolean, shots: Int, spreadEv: Float) {
         _uiState.update { it.copy(aebEnabled = enabled, aebShots = shots, aebSpreadEv = spreadEv) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
         val label = if (_uiState.value.aebHdrFusion) "Aether HDR+ ($shots EV ±${spreadEv})" else "AEB Brackets: $shots-Shot (±${spreadEv} EV)"
         showStatus(if (enabled) label else "HDR / AEB Disabled")
@@ -1132,6 +1552,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     fun onToggleAebHdrFusion() {
         val next = !_uiState.value.aebHdrFusion
         _uiState.update { it.copy(aebHdrFusion = next) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
         showStatus(if (next) "AEB Mode: Mertens HDR+ Fusion" else "AEB Mode: Individual Exposure Brackets")
     }
@@ -1223,8 +1644,9 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun onCycleAutomationTrigger() {
-        val options = listOf("timer", "timer_5s", "audio_clap", "gyro_shake", "immediate")
-        val idx = options.indexOf(_uiState.value.automationTriggerMode.lowercase())
+        val options = com.txor.commix.ui.components.CommixModeCatalog.AUTOMATION_TRIGGER_OPTIONS.map { it.first }
+        val normalized = com.txor.commix.ui.components.CommixModeCatalog.normalizeAutomationTrigger(_uiState.value.automationTriggerMode)
+        val idx = options.indexOf(normalized)
         onSetAutomationTrigger(options[(idx + 1).coerceAtLeast(0) % options.size])
     }
 
@@ -1248,17 +1670,20 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     fun onToggleProcessZero() {
         val next = !_uiState.value.isProcessZeroActive
         _uiState.update { it.copy(isProcessZeroActive = next) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
         showStatus(if (next) "Process Zero: Computational Smoothing Bypassed" else "Standard Engine Active")
     }
 
     fun onProcessZeroIntensityChanged(intensity: Float) {
         _uiState.update { it.copy(processZeroIntensity = intensity) }
+        preferences.save(_uiState.value)
         updateRepositoryParams()
     }
 
     fun onSelectAutomationPreset(presetId: String) {
         _uiState.update { it.copy(automationPresetId = presetId) }
+        preferences.save(_uiState.value)
     }
 
     fun onToggleSpaceZoomLock() {
@@ -1438,9 +1863,10 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
 
     fun onSetAutomationTrigger(trigger: String) {
-        _uiState.update { it.copy(automationTriggerMode = trigger) }
+        val normalized = com.txor.commix.ui.components.CommixModeCatalog.normalizeAutomationTrigger(trigger)
+        _uiState.update { it.copy(automationTriggerMode = normalized) }
         preferences.save(_uiState.value)
-        showStatus("Automation Trigger: ${trigger.uppercase()}")
+        showStatus("Automation Trigger: ${com.txor.commix.ui.components.CommixModeCatalog.formatAutomationTriggerShort(normalized)}")
     }
 
     fun onSetQueueWorkerThreads(threads: Int) {
@@ -1465,84 +1891,264 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         showStatus(if (next) "360° Photo Sphere Mode Active" else "Standard Panorama Mode")
     }
 
-    private var startPanoramaAzimuth: Float = 0f
-    private var startPanoramaPitch: Float = 0f
-    private var lastSliceAzimuth: Float = 0f
-    private val panoramaSlices = Collections.synchronizedList(mutableListOf<Pair<ByteArray, Float>>())
+    private data class PanoramaSlicePose(
+        val signedSweepDeg: Float,
+        val azimuthDeg: Float,
+        val pitchDeg: Float,
+        val rollDeg: Float
+    )
+
+    private val panoramaTracker = PanoramaSweepTracker()
+    private val panoramaSlices = Collections.synchronizedList(mutableListOf<PanoramaRawSlice>())
+    private val pendingPanoramaPoses = ArrayDeque<PanoramaSlicePose>()
+    @Volatile private var panoramaCaptureInFlight: Boolean = false
+    @Volatile private var panoramaInFlightSinceMs: Long = 0L
+    @Volatile private var lastPanoramaWarningHapticMs: Long = 0L
+
+    fun onTogglePanoramaDirection() {
+        if (_uiState.value.isPanoramaCapturing) return
+        val nextDir = if (_uiState.value.panoramaDirection >= 0) -1 else 1
+        _uiState.update { it.copy(panoramaDirection = nextDir) }
+        CommixHaptics.click(getApplication(), _uiState.value.hapticsEnabled)
+    }
 
     fun onUpdatePanoramaProgress(sweepAngle: Float, progress: Float) {
         _uiState.update { it.copy(panoramaSweepAngle = sweepAngle, panoramaProgress = progress) }
     }
 
+    private fun clearPanoramaPreviewStrip() {
+        val old = _panoramaPreviewStrip.value
+        _panoramaPreviewStrip.value = emptyList()
+        if (old.isNotEmpty()) {
+            viewModelScope.launch(Dispatchers.Default) {
+                old.forEach { bmp ->
+                    try {
+                        if (!bmp.isRecycled) bmp.recycle()
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+    }
+
+    private fun estimateActiveLensHfovDeg(state: CameraUiState): Float {
+        val activeCam = state.availableCameras.find { it.cameraId == state.activeCameraId }
+        val baseOpticalZoom = (activeCam?.opticalZoomFactor?.toDouble() ?: 1.0).coerceIn(0.45, 10.0)
+        val effectiveZoom = (baseOpticalZoom * state.zoomRatio).coerceIn(0.45, 12.0)
+        val halfBaseRad = Math.toRadians(PanoramaStitcher.DEFAULT_HFOV_DEG / 2.0)
+        val hfovDeg = Math.toDegrees(2.0 * kotlin.math.atan(kotlin.math.tan(halfBaseRad) / effectiveZoom))
+        return hfovDeg.toFloat().coerceIn(22f, 118f)
+    }
+
+    private fun dispatchPanoramaSliceCapture(pose: PanoramaSlicePose) {
+        val now = System.currentTimeMillis()
+        synchronized(pendingPanoramaPoses) {
+            pendingPanoramaPoses.addLast(pose)
+        }
+        panoramaCaptureInFlight = true
+        panoramaInFlightSinceMs = now
+        val meta = createShotMetadata(_uiState.value)
+        repository.takePanoramaSlice(meta)
+    }
+
+    private fun onPanoramaSliceArrived(bytes: ByteArray) {
+        panoramaCaptureInFlight = false
+        val pose = synchronized(pendingPanoramaPoses) {
+            if (pendingPanoramaPoses.isNotEmpty()) pendingPanoramaPoses.removeFirst() else null
+        } ?: PanoramaSlicePose(
+            signedSweepDeg = panoramaTracker.signedSweepDeg,
+            azimuthDeg = _uiState.value.azimuthDeg,
+            pitchDeg = _uiState.value.pitchDeg,
+            rollDeg = _uiState.value.rollDeg
+        )
+
+        val slice = PanoramaRawSlice(
+            jpegBytes = bytes,
+            signedSweepDeg = pose.signedSweepDeg,
+            azimuthDeg = pose.azimuthDeg,
+            pitchDeg = pose.pitchDeg,
+            rollDeg = pose.rollDeg
+        )
+        panoramaSlices.add(slice)
+        val count = panoramaSlices.size
+        _uiState.update { it.copy(panoramaCapturedFrames = count) }
+
+        // Decode a lightweight live preview thumbnail on background worker to grow the filmstrip ribbon
+        viewModelScope.launch(Dispatchers.Default) {
+            val thumb = PanoramaStitcher.decodePreviewThumbnail(bytes, targetHeight = 148)
+            if (thumb != null) {
+                if (_uiState.value.isPanoramaCapturing) {
+                    _panoramaPreviewStrip.update { existing -> existing + thumb }
+                } else {
+                    if (!thumb.isRecycled) thumb.recycle()
+                }
+            }
+        }
+    }
+
     fun startPanoramaCapture() {
         val s = _uiState.value
         panoramaSlices.clear()
-        val currentAz = s.azimuthDeg
-        val currentPi = s.pitchDeg
-        startPanoramaAzimuth = currentAz
-        startPanoramaPitch = currentPi
-        lastSliceAzimuth = currentAz
+        synchronized(pendingPanoramaPoses) { pendingPanoramaPoses.clear() }
+        clearPanoramaPreviewStrip()
+        panoramaCaptureInFlight = false
+        panoramaInFlightSinceMs = 0L
 
+        val now = System.currentTimeMillis()
+        panoramaTracker.start(
+            azimuthDeg = s.azimuthDeg,
+            pitchDeg = s.pitchDeg,
+            preferredDirection = s.panoramaDirection,
+            is360 = s.is360SphereMode,
+            nowMs = now
+        )
+
+        val dirWord = if (s.panoramaDirection >= 0) "right" else "left"
         _uiState.update {
             it.copy(
                 isPanoramaCapturing = true,
                 panoramaSweepAngle = 0f,
                 panoramaProgress = 0f,
-                panoramaCapturedFrames = 0
+                panoramaCapturedFrames = 0,
+                panoramaVerticalDriftDeg = 0f,
+                panoramaSpeedDegPerSec = 0f,
+                panoramaGuidanceHint = "Pan $dirWord along the line",
+                panoramaGuidanceSeverity = PanoramaGuidanceSeverity.OK.name
             )
         }
         repository.startPanoramaCapture()
+        CommixHaptics.click(getApplication(), s.hapticsEnabled)
 
-        // Capture initial frame 0 immediately
-        val meta = createShotMetadata(s)
-        repository.takePanoramaSlice(meta)
-
-        showStatus(if (s.is360SphereMode) "Capturing 360° Sphere: Sweep full circle" else "Capturing Panorama: Pan horizontally along the line")
+        // Capture initial frame 0 immediately with exact starting pose
+        dispatchPanoramaSliceCapture(
+            PanoramaSlicePose(
+                signedSweepDeg = 0f,
+                azimuthDeg = s.azimuthDeg,
+                pitchDeg = s.pitchDeg,
+                rollDeg = s.rollDeg
+            )
+        )
     }
 
-    private fun processPanoramaOrientation(azimuth: Float, pitch: Float, roll: Float) {
+    private fun processPanoramaOrientation(
+        azimuth: Float,
+        pitch: Float,
+        roll: Float,
+        yawRateDegSec: Float
+    ) {
         if (!_uiState.value.isPanoramaCapturing) return
 
-        val is360 = _uiState.value.is360SphereMode
-        val deltaFromStart = PanoramaStitcher.calculateWrappedDelta(azimuth, startPanoramaAzimuth)
-        val sweepAngle = abs(deltaFromStart)
-        val progress = PanoramaStitcher.calculateProgress(sweepAngle, is360)
-
-        _uiState.update {
-            it.copy(panoramaSweepAngle = sweepAngle, panoramaProgress = progress)
+        val now = System.currentTimeMillis()
+        // Safety timeout: never let a dropped Camera2 frame stall the entire sweep
+        if (panoramaCaptureInFlight && (now - panoramaInFlightSinceMs) > 650L) {
+            panoramaCaptureInFlight = false
         }
 
-        // Trigger slice capture every 15 degrees of angular sweep
-        val deltaSinceLastSlice = abs(PanoramaStitcher.calculateWrappedDelta(azimuth, lastSliceAzimuth))
-        if (deltaSinceLastSlice >= 15.0f) {
-            lastSliceAzimuth = azimuth
-            val meta = createShotMetadata(_uiState.value)
-            repository.takePanoramaSlice(meta)
+        val snap = panoramaTracker.update(
+            azimuthDeg = azimuth,
+            pitchDeg = pitch,
+            rollDeg = roll,
+            yawRateDegPerSec = yawRateDegSec,
+            nowMs = now,
+            captureInFlight = panoramaCaptureInFlight
+        )
+
+        _uiState.update {
+            it.copy(
+                panoramaDirection = snap.direction,
+                panoramaSweepAngle = snap.maxForwardSweepDeg,
+                panoramaProgress = snap.progress,
+                panoramaVerticalDriftDeg = snap.verticalDriftDeg,
+                panoramaSpeedDegPerSec = snap.panSpeedDegPerSec,
+                panoramaGuidanceHint = snap.guidanceHint,
+                panoramaGuidanceSeverity = snap.severity.name
+            )
+        }
+
+        // Tactile gentle pulse when panning too fast or backtracking
+        if ((snap.isMovingTooFast || snap.isBacktracking) && (now - lastPanoramaWarningHapticMs) > 750L) {
+            lastPanoramaWarningHapticMs = now
             CommixHaptics.tick(getApplication(), _uiState.value.hapticsEnabled)
         }
 
-        // If sweep reaches 100%, automatically finish and stitch
-        if (progress >= 1.0f) {
+        if (snap.shouldCaptureSlice) {
+            panoramaTracker.markSliceTriggered()
+            dispatchPanoramaSliceCapture(
+                PanoramaSlicePose(
+                    signedSweepDeg = snap.signedSweepDeg,
+                    azimuthDeg = azimuth,
+                    pitchDeg = pitch,
+                    rollDeg = roll
+                )
+            )
+            CommixHaptics.tick(getApplication(), _uiState.value.hapticsEnabled)
+        }
+
+        if (snap.isTargetComplete || snap.shouldAutoFinishOnReverse) {
             finishPanoramaCapture()
         }
+    }
+
+    fun cancelPanoramaCapture() {
+        if (!_uiState.value.isPanoramaCapturing) return
+        repository.stopPanoramaCapture()
+        panoramaSlices.clear()
+        synchronized(pendingPanoramaPoses) { pendingPanoramaPoses.clear() }
+        panoramaCaptureInFlight = false
+        clearPanoramaPreviewStrip()
+        _uiState.update {
+            it.copy(
+                isPanoramaCapturing = false,
+                panoramaProgress = 0f,
+                panoramaSweepAngle = 0f,
+                panoramaCapturedFrames = 0,
+                panoramaVerticalDriftDeg = 0f,
+                panoramaSpeedDegPerSec = 0f,
+                panoramaGuidanceHint = "",
+                panoramaGuidanceSeverity = PanoramaGuidanceSeverity.OK.name
+            )
+        }
+        showStatus("Panorama capture cancelled")
     }
 
     fun finishPanoramaCapture() {
         val isCapturing = _uiState.value.isPanoramaCapturing
         if (!isCapturing) return
 
-        _uiState.update { it.copy(isPanoramaCapturing = false) }
+        val stateSnapshot = _uiState.value
+        val is360 = stateSnapshot.is360SphereMode
+        val lensHfov = estimateActiveLensHfovDeg(stateSnapshot)
+
+        _uiState.update {
+            it.copy(
+                isPanoramaCapturing = false,
+                panoramaVerticalDriftDeg = 0f,
+                panoramaSpeedDegPerSec = 0f,
+                panoramaGuidanceHint = "",
+                panoramaGuidanceSeverity = PanoramaGuidanceSeverity.OK.name
+            )
+        }
+        CommixHaptics.click(getApplication(), stateSnapshot.hapticsEnabled)
         val repoSlices = repository.stopPanoramaCapture()
-        val is360 = _uiState.value.is360SphereMode
+        synchronized(pendingPanoramaPoses) { pendingPanoramaPoses.clear() }
+        panoramaCaptureInFlight = false
+        clearPanoramaPreviewStrip()
 
         viewModelScope.launch(Dispatchers.Default) {
             val slicesToStitch = synchronized(panoramaSlices) {
                 if (panoramaSlices.isNotEmpty()) {
                     ArrayList(panoramaSlices)
                 } else {
-                    repoSlices.mapIndexed { idx, bytes -> bytes to (idx * 15.0f) }
+                    repoSlices.mapIndexed { idx, bytes ->
+                        val angle = idx * PanoramaSweepTracker.DEFAULT_SLICE_STEP_DEG * stateSnapshot.panoramaDirection
+                        PanoramaRawSlice(
+                            jpegBytes = bytes,
+                            signedSweepDeg = angle,
+                            azimuthDeg = angle
+                        )
+                    }
                 }
             }
+            panoramaSlices.clear()
 
             if (slicesToStitch.isEmpty()) {
                 _uiState.update { it.copy(panoramaProgress = 0f, panoramaSweepAngle = 0f, panoramaCapturedFrames = 0) }
@@ -1553,12 +2159,13 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
             showStatus("Stitching ${if (is360) "360° Photo Sphere" else "Panorama"} (${slicesToStitch.size} frames)...")
 
             try {
-                val stitchedBytes = if (slicesToStitch.size == 1) {
-                    slicesToStitch.first().first
+                val stitchedBytes = if (slicesToStitch.size == 1 && !is360) {
+                    slicesToStitch.first().jpegBytes
                 } else {
-                    PanoramaStitcher.stitchByteArrays(
+                    PanoramaStitcher.stitchCapturedSlices(
                         rawSlices = slicesToStitch,
-                        is360 = is360
+                        is360 = is360,
+                        lensHFOVDeg = lensHfov
                     )
                 }
 
@@ -1577,12 +2184,22 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     // SPATIAL 180° VR HEMISPHERE & 360° SPHERE ENGINE
     // ═══════════════════════════════════════════════════════════════
 
+    private data class SpatialCapturePose(
+        val nodeId: Int,
+        val relYawDeg: Float,
+        val relPitchDeg: Float,
+        val rollDeg: Float
+    )
+
     private var spatialOriginAzimuth: Float = 0f
     private var spatialOriginPitch: Float = 0f
     @Volatile
     private var spatialLastTriggerMs: Long = 0L
     @Volatile
-    private var spatialPendingNodeId: Int = -1
+    private var spatialCaptureInFlight: Boolean = false
+    @Volatile
+    private var spatialInFlightSinceMs: Long = 0L
+    private val pendingSpatialPoses = ArrayDeque<SpatialCapturePose>()
     private val spatialFrames = Collections.synchronizedList(mutableListOf<SpatialRawFrame>())
 
     fun onSetSpatialFov(fovDeg: Int) {
@@ -1616,15 +2233,28 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         showStatus(if (next) "Spatial Auto-Lock Capture: ON" else "Spatial Capture: Manual Shutter")
     }
 
+    private fun dispatchSpatialSliceCapture(pose: SpatialCapturePose, state: CameraUiState) {
+        val now = System.currentTimeMillis()
+        synchronized(pendingSpatialPoses) {
+            pendingSpatialPoses.addLast(pose)
+        }
+        spatialCaptureInFlight = true
+        spatialInFlightSinceMs = now
+        spatialLastTriggerMs = now
+        repository.takePanoramaSlice(createShotMetadata(state))
+    }
+
     fun startSpatialCapture() {
         val s = _uiState.value
         val fov = SpatialFov.fromDegrees(s.spatialFovDeg)
         val freshGrid = SpatialCaptureEngine.generateTargetGrid(fov)
         spatialFrames.clear()
+        synchronized(pendingSpatialPoses) { pendingSpatialPoses.clear() }
+        spatialCaptureInFlight = false
+        spatialInFlightSinceMs = 0L
         spatialOriginAzimuth = s.azimuthDeg
         spatialOriginPitch = s.pitchDeg
-        spatialLastTriggerMs = System.currentTimeMillis()
-        spatialPendingNodeId = freshGrid.firstOrNull { it.yawDeg == 0f && it.pitchDeg == 0f }?.id ?: 0
+        val originNodeId = freshGrid.firstOrNull { it.yawDeg == 0f && it.pitchDeg == 0f }?.id ?: 0
 
         _uiState.update {
             it.copy(
@@ -1639,8 +2269,16 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         }
         repository.startPanoramaCapture()
 
-        // Capture origin anchor frame (0°, 0°) immediately
-        repository.takePanoramaSlice(createShotMetadata(s))
+        // Capture origin anchor frame (0°, 0°) immediately with exact trigger-time pose
+        dispatchSpatialSliceCapture(
+            SpatialCapturePose(
+                nodeId = originNodeId,
+                relYawDeg = 0f,
+                relPitchDeg = 0f,
+                rollDeg = s.rollDeg
+            ),
+            s
+        )
         CommixHaptics.heavy(getApplication(), s.hapticsEnabled)
         showStatus("Spatial ${fov.label} started — aim reticle at glowing dots")
     }
@@ -1649,16 +2287,23 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         val s = _uiState.value
         if (!s.isSpatialCapturing) return
         val now = System.currentTimeMillis()
+        if (spatialCaptureInFlight && (now - spatialInFlightSinceMs) < 650L) return
         if (now - spatialLastTriggerMs < 350L) return
-        spatialLastTriggerMs = now
 
         val nearest = SpatialCaptureEngine.findNearestUncapturedNode(
             s.spatialRelYawDeg,
             s.spatialRelPitchDeg,
             s.spatialNodes
         )
-        spatialPendingNodeId = nearest?.first?.id ?: -1
-        repository.takePanoramaSlice(createShotMetadata(s))
+        dispatchSpatialSliceCapture(
+            SpatialCapturePose(
+                nodeId = nearest?.first?.id ?: -1,
+                relYawDeg = s.spatialRelYawDeg,
+                relPitchDeg = s.spatialRelPitchDeg,
+                rollDeg = s.rollDeg
+            ),
+            s
+        )
         CommixHaptics.tick(getApplication(), s.hapticsEnabled)
     }
 
@@ -1676,39 +2321,54 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         if (!s.spatialAutoCapture) return
 
         val now = System.currentTimeMillis()
+        if (spatialCaptureInFlight && (now - spatialInFlightSinceMs) > 650L) {
+            spatialCaptureInFlight = false
+        }
+        if (spatialCaptureInFlight) return
         if (now - spatialLastTriggerMs < 750L) return
 
         val nearest = SpatialCaptureEngine.findNearestUncapturedNode(relYaw, relPitch, s.spatialNodes)
         if (nearest != null && SpatialCaptureEngine.isAlignedToNode(relYaw, relPitch, nearest.first)) {
-            spatialLastTriggerMs = now
-            spatialPendingNodeId = nearest.first.id
-            repository.takePanoramaSlice(createShotMetadata(s))
+            dispatchSpatialSliceCapture(
+                SpatialCapturePose(
+                    nodeId = nearest.first.id,
+                    relYawDeg = relYaw,
+                    relPitchDeg = relPitch,
+                    rollDeg = roll
+                ),
+                s
+            )
             CommixHaptics.tick(getApplication(), s.hapticsEnabled)
         }
     }
 
     private fun onSpatialSliceCaptured(bytes: ByteArray) {
+        spatialCaptureInFlight = false
         val s = _uiState.value
         if (!s.isSpatialCapturing) return
 
-        val relYaw = s.spatialRelYawDeg
-        val relPitch = s.spatialRelPitchDeg
-        val roll = s.rollDeg
+        val pose = synchronized(pendingSpatialPoses) {
+            if (pendingSpatialPoses.isNotEmpty()) pendingSpatialPoses.removeFirst() else null
+        } ?: SpatialCapturePose(
+            nodeId = -1,
+            relYawDeg = s.spatialRelYawDeg,
+            relPitchDeg = s.spatialRelPitchDeg,
+            rollDeg = s.rollDeg
+        )
 
-        // Match pending node or nearest uncaptured node
-        val targetId = if (spatialPendingNodeId >= 0 && s.spatialNodes.any { it.id == spatialPendingNodeId && !it.captured }) {
-            spatialPendingNodeId
+        // Match trigger-time pending node or nearest uncaptured node
+        val targetId = if (pose.nodeId >= 0 && s.spatialNodes.any { it.id == pose.nodeId && !it.captured }) {
+            pose.nodeId
         } else {
-            SpatialCaptureEngine.findNearestUncapturedNode(relYaw, relPitch, s.spatialNodes)?.first?.id ?: -1
+            SpatialCaptureEngine.findNearestUncapturedNode(pose.relYawDeg, pose.relPitchDeg, s.spatialNodes)?.first?.id ?: -1
         }
-        spatialPendingNodeId = -1
 
         spatialFrames.add(
             SpatialRawFrame(
                 jpegBytes = bytes,
-                relYawDeg = relYaw,
-                relPitchDeg = relPitch,
-                rollDeg = roll,
+                relYawDeg = pose.relYawDeg,
+                relPitchDeg = pose.relPitchDeg,
+                rollDeg = pose.rollDeg,
                 targetNodeId = targetId
             )
         )
@@ -1742,6 +2402,8 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
         if (!_uiState.value.isSpatialCapturing) return
         repository.stopPanoramaCapture()
         spatialFrames.clear()
+        synchronized(pendingSpatialPoses) { pendingSpatialPoses.clear() }
+        spatialCaptureInFlight = false
         val fov = SpatialFov.fromDegrees(_uiState.value.spatialFovDeg)
         val resetGrid = SpatialCaptureEngine.generateTargetGrid(fov)
         _uiState.update {
@@ -1764,8 +2426,12 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
         val fov = SpatialFov.fromDegrees(s.spatialFovDeg)
         val heading = spatialOriginAzimuth
+        val lensHfov = estimateActiveLensHfovDeg(s)
+        val lensVfov = (lensHfov * 0.78f).coerceIn(22f, 95f)
         _uiState.update { it.copy(isSpatialCapturing = false) }
         repository.stopPanoramaCapture()
+        synchronized(pendingSpatialPoses) { pendingSpatialPoses.clear() }
+        spatialCaptureInFlight = false
 
         viewModelScope.launch(Dispatchers.Default) {
             val framesToStitch = synchronized(spatialFrames) {
@@ -1792,7 +2458,9 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                 val stitchedBytes = SpatialCaptureEngine.stitchSpatialToJpeg(
                     frames = framesToStitch,
                     fov = fov,
-                    initialHeadingDeg = heading
+                    initialHeadingDeg = heading,
+                    hfovDeg = lensHfov,
+                    vfovDeg = lensVfov
                 )
                 repository.saveSpatialImage(
                     jpegBytes = stitchedBytes,
@@ -1854,21 +2522,24 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun stopAutomation() {
-        automationJob?.cancel()
+        val activeAutoJob = automationJob
         automationJob = null
+        val wasAutoActive = activeAutoJob?.isActive == true
+        activeAutoJob?.cancel()
         videoTimerJob?.cancel()
         videoTimerJob = null
         repository.sensorHub.onGyroVelocity = null
-        if (!_uiState.value.isRecording) {
-            repository.audioEngine.stopAudioMonitoring()
-        }
-        AutomationEngine.stopNativeBridge()
-        if (_uiState.value.isRecording) {
-            val priorJob = recordingJob
-            recordingJob = null
-            viewModelScope.launch(Dispatchers.Default) {
-                priorJob?.join()
-                repository.stopVideoRecording()
+        if (!wasAutoActive) {
+            AutomationEngine.stopNativeBridge()
+            if (_uiState.value.isRecording) {
+                val priorJob = recordingJob
+                recordingJob = null
+                viewModelScope.launch(Dispatchers.Default) {
+                    priorJob?.join()
+                    repository.stopVideoRecording()
+                }
+            } else {
+                repository.audioEngine.stopAudioMonitoring()
             }
         }
         _uiState.update {
@@ -1891,6 +2562,13 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
             // Real sensor / audio armed triggers before countdown & recording
             if (normalizedTrigger == "audio_clap" || normalizedTrigger == "clap" || normalizedTrigger == "audio") {
+                if (!repository.audioEngine.startAudioMonitoring()) {
+                    _uiState.update {
+                        it.copy(isAutomationRunning = false, automationListeningLabel = null)
+                    }
+                    showStatus("Clap trigger requires Microphone permission")
+                    return@launch
+                }
                 _uiState.update {
                     it.copy(
                         isAutomationRunning = true,
@@ -1898,7 +2576,6 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                         automationProgress = 0f
                     )
                 }
-                repository.audioEngine.startAudioMonitoring()
                 try {
                     while (isActive) {
                         val db = _uiState.value.audioDb
@@ -1994,28 +2671,24 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
             val totalDurationMs = (config.durationSeconds * 1000f).toLong().coerceAtLeast(100L)
             val startMs = System.currentTimeMillis()
+            var lastTickMs = startMs
 
             try {
                 while (isActive) {
                     val nowMs = System.currentTimeMillis()
+                    val dtSec = ((nowMs - lastTickMs) / 1000f).coerceIn(0.001f, 0.25f)
+                    lastTickMs = nowMs
                     val elapsedMs = nowMs - startMs
                     val elapsedSec = (elapsedMs / 1000f).coerceAtMost(config.durationSeconds)
                     val progress = (elapsedMs.toFloat() / totalDurationMs.toFloat()).coerceIn(0f, 1f)
 
                     val nativeValues = FloatArray(6)
                     val ticked = if (com.txor.commix.bridge.NativeEngineBridge.isLoaded) {
-                        com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeTick(0.033f, nativeValues)
+                        com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeTick(dtSec, nativeValues)
                     } else false
 
                     val values = if (ticked) {
-                        AutomationValues(
-                            zoom = if (nativeValues[0] > 0f) nativeValues[0].toDouble() else null,
-                            iso = if (nativeValues[1] > 0f) nativeValues[1].toInt() else null,
-                            shutterNs = if (nativeValues[2] > 0f) nativeValues[2].toLong() else null,
-                            ev = if (nativeValues[3] != 0f) nativeValues[3] else null,
-                            wbKelvin = if (nativeValues[4] > 0f) nativeValues[4].toInt() else null,
-                            focusDiopters = if (nativeValues[5] >= 0f) nativeValues[5] else null
-                        )
+                        AutomationEngine.decodeNativeTickValues(nativeValues)
                     } else {
                         config.evaluate(elapsedSec)
                     }
@@ -2027,6 +2700,12 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
                         )
                         values.zoom?.let { z ->
                             updated = updated.copy(zoomRatio = z.coerceIn(1.0, cur.maxZoomRatio))
+                        }
+                        values.iso?.let { isoVal ->
+                            updated = updated.copy(iso = isoVal)
+                        }
+                        values.shutterNs?.let { shNs ->
+                            updated = updated.copy(shutterNs = shNs)
                         }
                         values.ev?.let { ev ->
                             updated = updated.copy(evStops = ev)
@@ -2135,6 +2814,7 @@ class CommixViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        clearPanoramaPreviewStrip()
         try {
             getApplication<Application>().applicationContext.unregisterReceiver(batteryReceiver)
         } catch (_: Throwable) {}

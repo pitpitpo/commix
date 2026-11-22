@@ -31,6 +31,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import com.txor.commix.*
@@ -49,10 +50,14 @@ import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class CommixRepository(private val context: Context) {
     companion object {
         private const val TAG = "CommixRepository"
+        private const val MULTI_FRAME_MAX_DIM = 4096
     }
 
     private val ioScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -64,6 +69,8 @@ class CommixRepository(private val context: Context) {
 
     private var cameraThread: HandlerThread? = null
     private var cameraHandler: Handler? = null
+    private var imageReaderThread: HandlerThread? = null
+    private var imageReaderHandler: Handler? = null
     @Volatile private var activeCameraId: String? = null
     @Volatile private var routedPhysicalCameraId: String? = null
     @Volatile private var activeStillNeedsMaxResMode: Boolean = false
@@ -78,40 +85,65 @@ class CommixRepository(private val context: Context) {
     private var videoRecorder: CommixRecordingEngine? = null
     private var activeVideoFile: File? = null
     private var activeRecordingFps: Double = 30.0
+    @Volatile private var activeRecordingFpsRange: Range<Int>? = null
+    @Volatile private var activeRecordingFrameDurationNs: Long? = null
     @Volatile var isRecordingVideo = false
         private set
 
-    private var nightBurstCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
-    @Volatile private var isNightBurstActive = false
+    private val uniqueFileSeq = AtomicInteger(0)
+    private fun nextUniqueTimestamp(): String {
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+        val seq = uniqueFileSeq.incrementAndGet() and 0xFFF
+        return "${ts}_${seq}"
+    }
 
-    private var longExposureCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
-    @Volatile private var isLongExposureBurstActive = false
-
-    private var aebBurstCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
-    @Volatile private var isAebHdrBurstActive = false
-
-    private var focusStackCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
-    @Volatile private var isFocusStackBurstActive = false
-
-    private var multiExposureCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
-    @Volatile private var isMultiExposureBurstActive = false
+    private var burstTimeoutRunnable: Runnable? = null
+    private val burstAccumulator = BurstFrameAccumulator(
+        scheduleTimeout = { delayMs, action ->
+            val h = cameraHandler
+            val r = Runnable { action() }
+            burstTimeoutRunnable?.let { h?.removeCallbacks(it) }
+            burstTimeoutRunnable = r
+            if (h != null) {
+                h.postDelayed(r, delayMs)
+            } else {
+                ioScope.launch {
+                    kotlinx.coroutines.delay(delayMs)
+                    action()
+                }
+            }
+        },
+        cancelTimeout = {
+            burstTimeoutRunnable?.let { cameraHandler?.removeCallbacks(it) }
+            burstTimeoutRunnable = null
+        }
+    )
 
     private var panoramaSliceCollector = Collections.synchronizedList(mutableListOf<ByteArray>())
     @Volatile var isPanoramaActive = false
         private set
+    @Volatile private var isPanoramaExposureLocked = false
 
     private var activeCharacteristics: CameraCharacteristics? = null
     private var currentParams = CaptureRequestParams()
     private var previewRequestBuilder: CaptureRequest.Builder? = null
 
     @Volatile var deviceRotationDeg: Int = 0
+    @Volatile var lumaGridEnabled: Boolean = false
+    @Volatile var latestLumaGrid: FloatArray = FloatArray(0)
+    @Volatile private var isGyroflowActiveForRecording: Boolean = false
+    @Volatile private var captureRollDegSnapshot: Float = 0f
     @Volatile private var lastAutoIso: Int = 0
     @Volatile private var lastAutoExposureTimeNs: Long = 0L
     @Volatile private var lastFocusDistanceDiopters: Float = 0f
 
+    val hasGyroSensor: Boolean
+        get() = sensorHub.hasGyroscopeSensor
+
     var onPhotoSaved: ((Uri) -> Unit)? = null
     var onVideoSaved: ((Uri) -> Unit)? = null
     var onPanoramaSliceCaptured: ((ByteArray) -> Unit)? = null
+    var onPanoramaSliceFailed: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onPreviewSizeConfigured: ((Size, Float, Double) -> Unit)? = null
     var onThermalStatusChanged: ((String, Int) -> Unit)? = null
@@ -185,6 +217,12 @@ class CommixRepository(private val context: Context) {
             cameraThread = HandlerThread("CommixCameraThread").apply {
                 start()
                 cameraHandler = Handler(looper)
+            }
+        }
+        if (imageReaderThread == null || imageReaderThread?.isAlive == false) {
+            imageReaderThread = HandlerThread("CommixImageReaderThread").apply {
+                start()
+                imageReaderHandler = Handler(looper)
             }
         }
     }
@@ -428,6 +466,7 @@ class CommixRepository(private val context: Context) {
 
     fun pauseCamera() {
         Log.d(TAG, "pauseCamera() - releasing camera session and device for background")
+        burstAccumulator.cancel()
         if (isRecordingVideo) {
             try { stopVideoRecording() } catch (_: Exception) {}
         }
@@ -672,27 +711,24 @@ class CommixRepository(private val context: Context) {
                 }
 
                 when {
-                    isNightBurstActive -> synchronized(nightBurstCollector) { nightBurstCollector.add(bytes) }
-                    isLongExposureBurstActive -> synchronized(longExposureCollector) { longExposureCollector.add(bytes) }
-                    isAebHdrBurstActive -> synchronized(aebBurstCollector) { aebBurstCollector.add(bytes) }
-                    isFocusStackBurstActive -> synchronized(focusStackCollector) { focusStackCollector.add(bytes) }
-                    isMultiExposureBurstActive -> synchronized(multiExposureCollector) { multiExposureCollector.add(bytes) }
+                    burstAccumulator.onFrame(bytes) -> Unit
                     isPanoramaActive -> {
                         synchronized(panoramaSliceCollector) { panoramaSliceCollector.add(bytes) }
                         onPanoramaSliceCaptured?.invoke(bytes)
                     }
                     else -> {
                         ioScope.launch {
-                            val (processed, rotated) = processToneAndGrain(bytes)
-                            saveStillBytes(processed, isNight = false, pixelsAlreadyRotated = rotated)
+                            val (processed, exifDeg) = processToneAndGrain(bytes)
+                            saveStillBytes(processed, isNight = false, exifOrientationDegrees = exifDeg)
                         }
                     }
                 }
             }
+            val readerCallbackHandler = imageReaderHandler ?: handler
             for (maxImgs in listOf(8, 4, 2)) {
                 try {
                     stillReader = ImageReader.newInstance(targetJpeg.width, targetJpeg.height, ImageFormat.JPEG, maxImgs).apply {
-                        setOnImageAvailableListener(imageAvailableListener, handler)
+                        setOnImageAvailableListener(imageAvailableListener, readerCallbackHandler)
                     }
                     break
                 } catch (e: Exception) {
@@ -942,7 +978,6 @@ class CommixRepository(private val context: Context) {
     }
 
     private fun processAnalysisFrame(image: Image) {
-        if (!NativeTelemetryBridge.isLoaded) return
         try {
             val planes = image.planes
             if (planes.size < 3) return
@@ -951,14 +986,34 @@ class CommixRepository(private val context: Context) {
             val uBuf = planes[1].buffer
             val vBuf = planes[2].buffer
 
-            NativeTelemetryBridge.nativeComputeScopesDirect(
-                yBuf, uBuf, vBuf,
-                image.width, image.height,
-                planes[0].rowStride,
-                planes[1].rowStride,
-                planes[1].pixelStride,
-                2 // Step size
-            )
+            if (lumaGridEnabled) {
+                val yDup = yBuf.duplicate()
+                yDup.rewind()
+                val bytes = ByteArray(yDup.remaining())
+                yDup.get(bytes)
+                latestLumaGrid = StabilizationPolicyEngine.sampleLumaIreGrid(
+                    yPlane = bytes,
+                    width = image.width,
+                    height = image.height,
+                    rowStride = planes[0].rowStride,
+                    gridW = 32,
+                    gridH = 24
+                )
+            }
+
+            if (NativeTelemetryBridge.isLoaded) {
+                yBuf.rewind()
+                uBuf.rewind()
+                vBuf.rewind()
+                NativeTelemetryBridge.nativeComputeScopesDirect(
+                    yBuf, uBuf, vBuf,
+                    image.width, image.height,
+                    planes[0].rowStride,
+                    planes[1].rowStride,
+                    planes[1].pixelStride,
+                    2 // Step size
+                )
+            }
         } catch (_: Throwable) {}
     }
 
@@ -966,6 +1021,11 @@ class CommixRepository(private val context: Context) {
         val oldMp = currentParams.targetPhotoMp
         val sensRange = activeCharacteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val expRange = activeCharacteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val stabModes = activeCharacteristics?.get(CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES) ?: IntArray(0)
+        val hasEisHw = stabModes.contains(CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_ON)
+        val hasPreviewStabHw = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            stabModes.contains(CameraCharacteristics.CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION)
+        } else false
         val enriched = params.copy(
             evRange = params.evRange ?: activeCharacteristics?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE),
             zoomRatioRange = params.zoomRatioRange ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -975,6 +1035,8 @@ class CommixRepository(private val context: Context) {
             hasOisHardware = activeCharacteristics?.get(CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION)?.any {
                 it == CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_ON
             } == true,
+            hasEisHardware = hasEisHw,
+            hasPreviewStabilizationHardware = hasPreviewStabHw,
             availableAntibandingModes = params.availableAntibandingModes
                 ?: activeCharacteristics?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES),
             sensitivityRange = params.sensitivityRange ?: sensRange?.let { it.lower..it.upper },
@@ -1039,9 +1101,35 @@ class CommixRepository(private val context: Context) {
         val surface = previewSurface
         if (surface == null || !surface.isValid) return@Runnable
 
-        CaptureRequestFactory.applyControls(builder, currentParams)
+        CaptureRequestFactory.applyControls(
+            builder,
+            currentParams.copy(
+                isVideoRecordingPhase = isRecordingVideo,
+                isCapturePhaseActive = false
+            )
+        )
+        if (isPanoramaExposureLocked) {
+            try {
+                builder.set(CaptureRequest.CONTROL_AE_LOCK, true)
+                builder.set(CaptureRequest.CONTROL_AWB_LOCK, true)
+            } catch (_: Exception) {}
+        }
+        if (isRecordingVideo) {
+            activeRecordingFpsRange?.let { range ->
+                try { builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range) } catch (_: Exception) {}
+            }
+            activeRecordingFrameDurationNs?.let { durNs ->
+                try { builder.set(CaptureRequest.SENSOR_FRAME_DURATION, durNs) } catch (_: Exception) {}
+            }
+        }
         try {
-            session.setRepeatingRequest(builder.build(), previewCaptureCallback, handler)
+            if (session is CameraConstrainedHighSpeedCaptureSession) {
+                val requestList = session.createHighSpeedRequestList(builder.build())
+                session.setRepeatingBurst(requestList, null, handler)
+            } else {
+                val cb = if (isRecordingVideo) null else previewCaptureCallback
+                session.setRepeatingRequest(builder.build(), cb, handler)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Error applying capture controls: ${e.message}")
         }
@@ -1071,7 +1159,7 @@ class CommixRepository(private val context: Context) {
         val reqW = dims.getOrNull(0)?.toIntOrNull() ?: 1920
         val reqH = dims.getOrNull(1)?.toIntOrNull() ?: 1080
 
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timeStamp = nextUniqueTimestamp()
         val videoDir = File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "Commix").apply { mkdirs() }
         val vidFile = File(videoDir, "COMMIX_VID_$timeStamp.mp4")
         activeVideoFile = vidFile
@@ -1152,7 +1240,7 @@ class CommixRepository(private val context: Context) {
                            currentParams.toneCurve.contains("hdr", ignoreCase = true) ||
                            quirks.canSupportDynamicRangeProfiles)
 
-            val shouldRecordAudio = !isSlowMotion
+            val shouldRecordAudio = !isSlowMotion && targetFpsFloat >= 5.0 && audioEngine.hasAudioPermission()
             val videoOrientationHint = computeJpegOrientation()
             val recorder = CommixRecordingEngine(
                 outputFile = vidFile,
@@ -1165,7 +1253,7 @@ class CommixRepository(private val context: Context) {
                 mimeType = videoMime,
                 isHdr10 = isHdr10,
                 iFrameIntervalSeconds = iFrameIntervalSec,
-                useSyntheticPts = (targetFpsFloat != 30.0 || isSlowMotion),
+                useSyntheticPts = (isSlowMotion || targetFpsFloat < 5.0),
                 recordAudio = shouldRecordAudio,
                 audioSampleRate = audioEngine.sampleRate,
                 uncompressedAudio = currentParams.uncompressedAudio,
@@ -1184,8 +1272,24 @@ class CommixRepository(private val context: Context) {
             activeRecordingFps = targetFpsFloat
             isRecordingVideo = true
 
-            // Start hardware gyro/accel logging for genuine Gyroflow export
-            sensorHub.startImuLogging()
+            val recStabPlan = StabilizationPolicyEngine.resolve(
+                engineModeRaw = currentParams.stabilizationEngineMode,
+                applyWhenRaw = currentParams.stabilizationApplyWhen,
+                phase = StabilizationPolicyEngine.CapturePhase.VIDEO_RECORDING,
+                activeCameraMode = currentParams.activeMode,
+                caps = StabilizationPolicyEngine.HardwareCapabilities(
+                    hasOis = currentParams.hasOisHardware,
+                    hasEis = currentParams.hasEisHardware,
+                    hasPreviewStabilization = currentParams.hasPreviewStabilizationHardware,
+                    apiLevel = Build.VERSION.SDK_INT
+                ),
+                photoAutoLevelEnabled = currentParams.photoAutoLevelEnabled,
+                gyroflowExportEnabled = currentParams.gyroflowExportEnabled
+            )
+            isGyroflowActiveForRecording = recStabPlan.shouldLogGyroflow
+            if (isGyroflowActiveForRecording) {
+                sensorHub.startImuLogging()
+            }
 
             val soloPass = isVfDisabled || currentParams.isViewfinderDisabled
             val recordSurfaces = if (soloPass) {
@@ -1210,14 +1314,21 @@ class CommixRepository(private val context: Context) {
                         addTarget(recSurface)
                     }
 
+                    val recParams = currentParams.copy(
+                        isVideoRecordingPhase = true,
+                        isCapturePhaseActive = true
+                    )
+
                     if (session is CameraConstrainedHighSpeedCaptureSession && bestHsRange != null) {
+                        activeRecordingFpsRange = bestHsRange
+                        activeRecordingFrameDurationNs = null
                         try {
                             builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, bestHsRange)
                         } catch (_: Exception) {}
                         previewRequestBuilder = builder
-                        applyCaptureParams()
-
+                        CaptureRequestFactory.applyControls(builder, recParams)
                         try {
+                            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, bestHsRange)
                             val requestList = session.createHighSpeedRequestList(builder.build())
                             session.setRepeatingBurst(requestList, null, handler)
                         } catch (e: Exception) {
@@ -1232,18 +1343,19 @@ class CommixRepository(private val context: Context) {
                             fpsRanges?.filter { it.upper <= maxOf(targetFps, 15) }?.maxByOrNull { it.upper }
                                 ?: fpsRanges?.minByOrNull { kotlin.math.abs(it.upper - targetFps) }
                         }
+                        activeRecordingFpsRange = bestRange
+                        val frameDurationNs = 1_000_000_000L / targetFps
+                        activeRecordingFrameDurationNs = frameDurationNs
+                        previewRequestBuilder = builder
+                        CaptureRequestFactory.applyControls(builder, recParams)
                         if (bestRange != null) {
                             try {
                                 builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, bestRange)
                             } catch (_: Exception) {}
                         }
                         try {
-                            val frameDurationNs = 1_000_000_000L / targetFps
                             builder.set(CaptureRequest.SENSOR_FRAME_DURATION, frameDurationNs)
                         } catch (_: Exception) {}
-
-                        previewRequestBuilder = builder
-                        applyCaptureParams()
 
                         try {
                             session.setRepeatingRequest(builder.build(), null, handler)
@@ -1255,7 +1367,9 @@ class CommixRepository(private val context: Context) {
                     if (shouldRecordAudio) {
                         audioEngine.startAudioMonitoring()
                     }
-                    NativeEngineBridge.nativeStartImuLogging()
+                    if (isGyroflowActiveForRecording) {
+                        NativeEngineBridge.nativeStartImuLogging()
+                    }
                 }
 
                 override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -1263,6 +1377,8 @@ class CommixRepository(private val context: Context) {
                     audioEngine.audioFrameSink = null
                     audioEngine.stopAudioMonitoring()
                     isRecordingVideo = false
+                    activeRecordingFpsRange = null
+                    activeRecordingFrameDurationNs = null
                     try { videoRecorder?.stop() } catch (_: Exception) {}
                     videoRecorder = null
                     val dev = sessionManager.activeDevice
@@ -1298,6 +1414,8 @@ class CommixRepository(private val context: Context) {
     fun stopVideoRecording() {
         if (!isRecordingVideo) return
         isRecordingVideo = false
+        activeRecordingFpsRange = null
+        activeRecordingFrameDurationNs = null
         audioEngine.audioFrameSink = null
         audioEngine.stopAudioMonitoring()
 
@@ -1309,9 +1427,11 @@ class CommixRepository(private val context: Context) {
         val recorder = videoRecorder
         videoRecorder = null
 
-        // Stop real hardware IMU logging
-        val imuSamples = sensorHub.stopImuLogging()
+        val shouldExportGyroflow = isGyroflowActiveForRecording
+        isGyroflowActiveForRecording = false
+        val imuSamples = if (shouldExportGyroflow) sensorHub.stopImuLogging() else emptyList()
 
+        val sessionStoppedLatch = CountDownLatch(1)
         val handler = cameraHandler
         val stopAndReconfig = Runnable {
             try {
@@ -1319,6 +1439,8 @@ class CommixRepository(private val context: Context) {
                 sessionManager.activeSession?.abortCaptures()
             } catch (e: Exception) {
                 Log.w(TAG, "Error stopping repeating during video stop: ${e.message}")
+            } finally {
+                sessionStoppedLatch.countDown()
             }
             if (camera != null && pSurf != null && pSurf.isValid) {
                 configureSession(camera, pSurf) {}
@@ -1333,29 +1455,41 @@ class CommixRepository(private val context: Context) {
         // Move heavy muxer finalization, Gyroflow export, and MediaStore storage to background I/O
         ioScope.launch {
             try {
+                sessionStoppedLatch.await(300L, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {}
+            try {
                 recorder?.stop()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping video recorder: ${e.message}")
             }
 
             if (vidFile != null && vidFile.exists()) {
-                val csvFile = File(vidFile.parentFile, vidFile.nameWithoutExtension + ".gcsv")
-                try {
-                    val exported: Boolean = if (imuSamples.isNotEmpty()) {
-                        sensorHub.exportGyroflowGcsv(csvFile, imuSamples)
-                        true
-                    } else {
-                        NativeEngineBridge.nativeStopAndExportGyroflow(
-                            csvFile.absolutePath,
-                            activeCamId,
-                            activeFps
-                        )
+                if (shouldExportGyroflow) {
+                    val csvFile = File(vidFile.parentFile, vidFile.nameWithoutExtension + ".gcsv")
+                    val camLabel = "${Build.MODEL}_CAM_$activeCamId"
+                    try {
+                        val exported: Boolean = if (imuSamples.isNotEmpty()) {
+                            sensorHub.exportGyroflowGcsv(
+                                file = csvFile,
+                                samples = imuSamples,
+                                videoFilename = vidFile.name,
+                                cameraName = camLabel,
+                                frameReadoutTimeMs = 15.0
+                            )
+                            true
+                        } else {
+                            NativeEngineBridge.nativeStopAndExportGyroflow(
+                                csvFile.absolutePath,
+                                camLabel,
+                                activeFps
+                            )
+                        }
+                        if (exported && csvFile.exists() && csvFile.length() > 0L) {
+                            saveGyroflowSidecarToMediaStore(csvFile)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Gyroflow export error: ${e.message}")
                     }
-                    if (exported && csvFile.exists() && csvFile.length() > 0L) {
-                        saveGyroflowSidecarToMediaStore(csvFile)
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Gyroflow export error: ${e.message}")
                 }
 
                 saveVideoToMediaStore(vidFile)
@@ -1462,6 +1596,9 @@ class CommixRepository(private val context: Context) {
             return
         }
 
+        // Snapshot live IMU roll at exact shutter press for Software Photo Auto-Level
+        captureRollDegSnapshot = sensorHub.currentRollDeg.toFloat()
+
         if (currentParams.aebEnabled) {
             takeAebBurst(metadata)
             return
@@ -1495,7 +1632,9 @@ class CommixRepository(private val context: Context) {
             val activeRaw = rawReader?.takeIf { it.surface.isValid && currentParams.photoFormat.equals("raw_dng", ignoreCase = true) }
             val stillParams = currentParams.copy(
                 useMaximumResolutionSensorMode = activeStillNeedsMaxResMode,
-                virtualGainMultiplier = extPlan.virtualIsoGain
+                virtualGainMultiplier = extPlan.virtualIsoGain,
+                isCapturePhaseActive = true,
+                isVideoRecordingPhase = false
             )
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 if (activeRaw != null) {
@@ -1556,7 +1695,7 @@ class CommixRepository(private val context: Context) {
         }
         val jpegOrientation = computeJpegOrientation()
         ioScope.launch {
-            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val timeStamp = nextUniqueTimestamp()
             val fileName = "COMMIX_RAW_$timeStamp.dng"
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
@@ -1602,22 +1741,59 @@ class CommixRepository(private val context: Context) {
         }
     }
 
+    private fun decodeBitmapOomSafe(
+        bytes: ByteArray,
+        maxDimension: Int = MULTI_FRAME_MAX_DIM,
+        mutable: Boolean = false
+    ): Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val srcMax = maxOf(bounds.outWidth, bounds.outHeight)
+            if (srcMax <= 0) return null
+            var sample = 1
+            while (maxDimension > 0 && srcMax / (sample * 2) >= maxDimension) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inMutable = mutable
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+        } catch (t: Throwable) {
+            Log.w(TAG, "decodeBitmapOomSafe failed: ${t.message}")
+            null
+        }
+    }
+
     private fun takeVirtualExtendedShutterBurst(
         metadata: ShotMetadata,
         extPlan: CaptureRequestFactory.VirtualExtensionPlan
     ) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
-        if (!reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for extended shutter")
+            return
+        }
 
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
-        isLongExposureBurstActive = true
-        synchronized(longExposureCollector) { longExposureCollector.clear() }
-
         val jpegOrientation = computeJpegOrientation()
         val burstCount = extPlan.virtualShutterFrames.coerceIn(2, 16)
+        val burstSessionId = burstAccumulator.begin(expectedCount = burstCount) { frames ->
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            if (frames.isNotEmpty()) {
+                ioScope.launch {
+                    processLongExposureFrames(frames, "silky_water", virtualGain = extPlan.virtualIsoGain)
+                }
+            } else {
+                onError?.invoke("Virtual extended shutter captured no frames")
+            }
+        }
+
         val stillParams = currentParams.copy(
             iso = extPlan.hardwareIso,
             expNs = extPlan.hardwareExpNs,
@@ -1637,45 +1813,34 @@ class CommixRepository(private val context: Context) {
             session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    val frames = synchronized(longExposureCollector) {
-                        val copy = longExposureCollector.toList()
-                        longExposureCollector.clear()
-                        copy
-                    }
-                    isLongExposureBurstActive = false
-                    if (frames.isNotEmpty()) {
-                        ioScope.launch {
-                            processLongExposureFrames(frames, "silky_water", virtualGain = extPlan.virtualIsoGain)
-                        }
-                    }
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
                 }
 
-                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isLongExposureBurstActive = false
-                    onError?.invoke("Virtual extended shutter capture failed")
+                    burstAccumulator.onSequenceAborted(burstSessionId)
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Virtual extended shutter error: ${e.message}")
+            burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isLongExposureBurstActive = false
+            onError?.invoke("Virtual extended shutter error: ${e.message}")
         }
     }
 
     private fun takeAebBurst(metadata: ShotMetadata) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
-        if (!reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for AEB")
+            return
+        }
 
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
         val fuseHdr = currentParams.aebHdrFusion
-        if (fuseHdr) {
-            isAebHdrBurstActive = true
-            synchronized(aebBurstCollector) { aebBurstCollector.clear() }
-        }
         val jpegOrientation = computeJpegOrientation()
         val shots = currentParams.aebShots.coerceIn(3, 5)
         val spread = currentParams.aebSpreadEv.coerceIn(0.5f, 2.0f)
@@ -1686,6 +1851,26 @@ class CommixRepository(private val context: Context) {
         } else {
             listOf(-spread, -spread / 2f, 0.0f, spread / 2f, spread)
         }
+
+        val burstSessionId = if (fuseHdr) {
+            burstAccumulator.begin(expectedCount = offsets.size) { frames ->
+                sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+                if (frames.isNotEmpty()) {
+                    ProcessingJobQueue.instance.enqueueJobWithContext(
+                        title = "Aether HDR+ Mertens Fusion (${frames.size} EV)",
+                        type = ProcessingJobType.MULTI_EXPOSURE_STACK,
+                        priority = JobPriority.HIGH,
+                        executionBlock = { ctx ->
+                            ctx.updateProgress(0.2f, "Aligning & fusing ${frames.size} EV brackets...")
+                            processAebHdrFrames(frames)
+                            ctx.updateProgress(1.0f, "HDR+ master saved")
+                        }
+                    )
+                } else {
+                    onError?.invoke("AEB HDR+ captured no frames")
+                }
+            }
+        } else -1L
 
         val requests = offsets.map { offsetEv ->
             device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
@@ -1707,58 +1892,42 @@ class CommixRepository(private val context: Context) {
                     frameNumber: Long
                 ) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    if (fuseHdr) {
-                        val frames = synchronized(aebBurstCollector) {
-                            val copy = aebBurstCollector.toList()
-                            aebBurstCollector.clear()
-                            copy
-                        }
-                        isAebHdrBurstActive = false
-                        if (frames.isNotEmpty()) {
-                            ProcessingJobQueue.instance.enqueueJobWithContext(
-                                title = "Aether HDR+ Mertens Fusion (${frames.size} EV)",
-                                type = ProcessingJobType.MULTI_EXPOSURE_STACK,
-                                priority = JobPriority.HIGH,
-                                executionBlock = { ctx ->
-                                    ctx.updateProgress(0.2f, "Aligning & fusing ${frames.size} EV brackets...")
-                                    processAebHdrFrames(frames)
-                                    ctx.updateProgress(1.0f, "HDR+ master saved")
-                                }
-                            )
-                        }
+                    if (fuseHdr && burstSessionId > 0L) {
+                        burstAccumulator.onSequenceCompleted(burstSessionId)
                     }
                 }
 
-                override fun onCaptureFailed(
-                    session: CameraCaptureSession,
-                    request: CaptureRequest,
-                    failure: CaptureFailure
-                ) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isAebHdrBurstActive = false
-                    onError?.invoke("AEB burst capture failed: ${failure.reason}")
+                    if (fuseHdr && burstSessionId > 0L) {
+                        burstAccumulator.onSequenceAborted(burstSessionId)
+                    } else {
+                        onError?.invoke("AEB burst sequence aborted")
+                    }
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "AEB capture error: ${e.message}")
+            if (fuseHdr) burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isAebHdrBurstActive = false
+            onError?.invoke("AEB capture error: ${e.message}")
         }
     }
 
     private fun processAebHdrFrames(frames: List<ByteArray>) {
         if (frames.size < 2 || !NativeEngineBridge.isLoaded) {
             val mid = frames[frames.size / 2]
-            val (processed, rotated) = processToneAndGrain(mid)
-            saveStillBytes(processed, isNight = false, customPrefix = "COMMIX_HDR_", pixelsAlreadyRotated = rotated)
+            val (processed, exifDeg) = processToneAndGrain(mid)
+            saveStillBytes(processed, isNight = false, customPrefix = "COMMIX_HDR_", exifOrientationDegrees = exifDeg)
             return
         }
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(frames[frames.size / 2])
         try {
             val frameBuffers = mutableListOf<ByteBuffer>()
             var width = 0
             var height = 0
             for (bytes in frames) {
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                val bmp = decodeBitmapOomSafe(bytes, MULTI_FRAME_MAX_DIM) ?: continue
                 if (width == 0) {
                     width = bmp.width
                     height = bmp.height
@@ -1791,28 +1960,32 @@ class CommixRepository(private val context: Context) {
                     }
                     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     bmp.copyPixelsFromBuffer(outBuf)
-                    val (finalBmp, rotated) = maybeRotateBitmapForFormat(bmp)
-                    val stream = ByteArrayOutputStream()
                     val q = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-                    PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, q, stream)
+                    val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, q)
+                    val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(bmp, srcExifDeg, resolvedFmt)
+                    val stream = ByteArrayOutputStream()
+                    PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, q, stream)
                     finalBmp.recycle()
-                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_HDR_", pixelsAlreadyRotated = rotated)
+                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_HDR_", exifOrientationDegrees = exifDeg)
                     return
                 }
             }
             val mid = frames[frames.size / 2]
-            saveStillBytes(mid, isNight = false, customPrefix = "COMMIX_HDR_")
+            saveStillBytes(mid, isNight = false, customPrefix = "COMMIX_HDR_", exifOrientationDegrees = srcExifDeg)
         } catch (t: Throwable) {
             Log.e(TAG, "processAebHdrFrames error: ${t.message}", t)
-            saveStillBytes(frames[frames.size / 2], isNight = false, customPrefix = "COMMIX_HDR_")
+            saveStillBytes(frames[frames.size / 2], isNight = false, customPrefix = "COMMIX_HDR_", exifOrientationDegrees = srcExifDeg)
         }
     }
 
     fun startPanoramaCapture() {
         isPanoramaActive = true
+        isPanoramaExposureLocked = true
         synchronized(panoramaSliceCollector) {
             panoramaSliceCollector.clear()
         }
+        // Lock AE and AWB for consistent exposure and white balance across every panorama slice
+        applyCaptureParams()
     }
 
     fun takePanoramaSlice(metadata: ShotMetadata) {
@@ -1823,6 +1996,7 @@ class CommixRepository(private val context: Context) {
 
         if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
             Log.w(TAG, "Cannot take panorama slice: camera hardware or reader not ready (state=${sessionManager.state})")
+            onPanoramaSliceFailed?.invoke()
             return
         }
 
@@ -1831,6 +2005,12 @@ class CommixRepository(private val context: Context) {
             val captureBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
                 CaptureRequestFactory.applyControls(this, currentParams)
+                if (isPanoramaExposureLocked) {
+                    try {
+                        set(CaptureRequest.CONTROL_AE_LOCK, true)
+                        set(CaptureRequest.CONTROL_AWB_LOCK, true)
+                    } catch (_: Exception) {}
+                }
                 val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, metadata.compressionQuality)) 100 else metadata.compressionQuality.coerceIn(1, 100)
                 set(CaptureRequest.JPEG_QUALITY, effectiveQuality.toByte())
                 set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
@@ -1843,15 +2023,19 @@ class CommixRepository(private val context: Context) {
                     failure: CaptureFailure
                 ) {
                     Log.w(TAG, "Panorama slice capture failed: reason=${failure.reason}")
+                    onPanoramaSliceFailed?.invoke()
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Exception during takePanoramaSlice: ${e.message}")
+            onPanoramaSliceFailed?.invoke()
         }
     }
 
     fun stopPanoramaCapture(): List<ByteArray> {
         isPanoramaActive = false
+        isPanoramaExposureLocked = false
+        applyCaptureParams()
         return synchronized(panoramaSliceCollector) {
             val copy = ArrayList(panoramaSliceCollector)
             panoramaSliceCollector.clear()
@@ -1860,20 +2044,42 @@ class CommixRepository(private val context: Context) {
     }
 
     fun takeNightBurst(metadata: ShotMetadata) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
 
-        if (!reader.surface.isValid) return
-        if (sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for night burst")
+            return
+        }
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
-        isNightBurstActive = true
-        synchronized(nightBurstCollector) { nightBurstCollector.clear() }
 
         val jpegOrientation = computeJpegOrientation()
         val maxSupported = reader.maxImages.coerceAtLeast(3)
         val burstCount = currentParams.nightFrameCount.coerceIn(3, maxOf(3, maxSupported * 2).coerceAtMost(16))
+        val burstSessionId = burstAccumulator.begin(expectedCount = burstCount) { frames ->
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            if (frames.isEmpty()) {
+                onError?.invoke("Night burst captured no frames")
+                return@begin
+            }
+            if (currentParams.queueAutoQueueStacking) {
+                ProcessingJobQueue.instance.enqueueJobWithContext(
+                    title = "Night Burst Stacking (${frames.size} frames)",
+                    type = ProcessingJobType.MULTI_EXPOSURE_STACK,
+                    priority = JobPriority.HIGH,
+                    executionBlock = { ctx ->
+                        ctx.updateProgress(0.15f, "Decoding ${frames.size} burst frames...")
+                        processNightBurstFrames(frames)
+                        ctx.updateProgress(1.0f, "Night composite saved")
+                    }
+                )
+            } else {
+                ioScope.launch { processNightBurstFrames(frames) }
+            }
+        }
+
         val burstRequests = mutableListOf<CaptureRequest>()
         for (i in 0 until burstCount) {
             val req = device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
@@ -1894,56 +2100,27 @@ class CommixRepository(private val context: Context) {
                     frameNumber: Long
                 ) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    scheduleNightBurstProcessing()
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
                 }
 
-                override fun onCaptureFailed(
-                    session: CameraCaptureSession,
-                    request: CaptureRequest,
-                    failure: CaptureFailure
-                ) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isNightBurstActive = false
-                    onError?.invoke("Night burst capture sequence failed")
+                    burstAccumulator.onSequenceAborted(burstSessionId)
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Night burst capture failed: ${e.message}")
+            burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isNightBurstActive = false
             onError?.invoke("Night burst capture failed: ${e.message}")
         }
     }
 
-    private fun scheduleNightBurstProcessing() {
-        val frames = synchronized(nightBurstCollector) {
-            val list = nightBurstCollector.toList()
-            nightBurstCollector.clear()
-            list
-        }
-        isNightBurstActive = false
-        if (frames.isEmpty()) return
-
-        if (currentParams.queueAutoQueueStacking) {
-            ProcessingJobQueue.instance.enqueueJobWithContext(
-                title = "Night Burst Stacking (${frames.size} frames)",
-                type = ProcessingJobType.MULTI_EXPOSURE_STACK,
-                priority = JobPriority.HIGH,
-                executionBlock = { ctx ->
-                    ctx.updateProgress(0.15f, "Decoding ${frames.size} burst frames...")
-                    processNightBurstFrames(frames)
-                    ctx.updateProgress(1.0f, "Night composite saved")
-                }
-            )
-        } else {
-            ioScope.launch { processNightBurstFrames(frames) }
-        }
-    }
-
     private fun processNightBurstFrames(frames: List<ByteArray>) {
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(frames.first())
         try {
             if (frames.size < 2 || !NativeEngineBridge.isLoaded) {
-                saveStillBytes(frames.first(), isNight = true)
+                saveStillBytes(frames.first(), isNight = true, exifOrientationDegrees = srcExifDeg)
                 return
             }
 
@@ -1952,7 +2129,7 @@ class CommixRepository(private val context: Context) {
             var height = 0
 
             for (bytes in frames) {
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                val bmp = decodeBitmapOomSafe(bytes, MULTI_FRAME_MAX_DIM) ?: continue
                 if (width == 0) {
                     width = bmp.width
                     height = bmp.height
@@ -1967,7 +2144,7 @@ class CommixRepository(private val context: Context) {
             }
 
             if (frameBuffers.size < 2) {
-                saveStillBytes(frames.first(), isNight = true)
+                saveStillBytes(frames.first(), isNight = true, exifOrientationDegrees = srcExifDeg)
                 return
             }
 
@@ -2017,19 +2194,20 @@ class CommixRepository(private val context: Context) {
                     }
                 }
 
-                val (finalBmp, rotated) = maybeRotateBitmapForFormat(compositeBitmap)
-                val stream = ByteArrayOutputStream()
                 val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-                PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, effectiveQuality, stream)
+                val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, effectiveQuality)
+                val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(compositeBitmap, srcExifDeg, resolvedFmt)
+                val stream = ByteArrayOutputStream()
+                PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, effectiveQuality, stream)
                 finalBmp.recycle()
-                saveStillBytes(stream.toByteArray(), isNight = true, pixelsAlreadyRotated = rotated)
+                saveStillBytes(stream.toByteArray(), isNight = true, exifOrientationDegrees = exifDeg)
             } else {
-                saveStillBytes(frames.first(), isNight = true)
+                saveStillBytes(frames.first(), isNight = true, exifOrientationDegrees = srcExifDeg)
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Night burst processing failed: ${t.message}", t)
             if (frames.isNotEmpty()) {
-                saveStillBytes(frames.first(), isNight = true)
+                saveStillBytes(frames.first(), isNight = true, exifOrientationDegrees = srcExifDeg)
             }
         }
     }
@@ -2039,18 +2217,41 @@ class CommixRepository(private val context: Context) {
      * (SilkyWater / LightTrails / StarTrails / MovingCrowd).
      */
     fun takeLongExposureBurst(metadata: ShotMetadata) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
-        if (!reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for long exposure")
+            return
+        }
 
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
-        isLongExposureBurstActive = true
-        synchronized(longExposureCollector) { longExposureCollector.clear() }
-
         val jpegOrientation = computeJpegOrientation()
         val burstCount = currentParams.longExposureFrames.coerceIn(4, 16)
+        val style = currentParams.longExposureStyle
+        val burstSessionId = burstAccumulator.begin(expectedCount = burstCount) { frames ->
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            if (frames.isEmpty()) {
+                onError?.invoke("Long exposure captured no frames")
+                return@begin
+            }
+            if (currentParams.queueAutoQueueStacking) {
+                ProcessingJobQueue.instance.enqueueJobWithContext(
+                    title = "Long Exposure Synthesis ($style, ${frames.size}f)",
+                    type = ProcessingJobType.MULTI_EXPOSURE_STACK,
+                    priority = JobPriority.HIGH,
+                    executionBlock = { ctx ->
+                        ctx.updateProgress(0.2f, "Accumulating ${frames.size} exposure frames...")
+                        processLongExposureFrames(frames, style)
+                        ctx.updateProgress(1.0f, "Long exposure saved")
+                    }
+                )
+            } else {
+                ioScope.launch { processLongExposureFrames(frames, style) }
+            }
+        }
+
         val requests = List(burstCount) {
             device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
@@ -2065,47 +2266,26 @@ class CommixRepository(private val context: Context) {
             session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    val frames = synchronized(longExposureCollector) {
-                        val copy = longExposureCollector.toList()
-                        longExposureCollector.clear()
-                        copy
-                    }
-                    isLongExposureBurstActive = false
-                    if (frames.isNotEmpty()) {
-                        val style = currentParams.longExposureStyle
-                        if (currentParams.queueAutoQueueStacking) {
-                            ProcessingJobQueue.instance.enqueueJobWithContext(
-                                title = "Long Exposure Synthesis ($style, ${frames.size}f)",
-                                type = ProcessingJobType.MULTI_EXPOSURE_STACK,
-                                priority = JobPriority.HIGH,
-                                executionBlock = { ctx ->
-                                    ctx.updateProgress(0.2f, "Accumulating ${frames.size} exposure frames...")
-                                    processLongExposureFrames(frames, style)
-                                    ctx.updateProgress(1.0f, "Long exposure saved")
-                                }
-                            )
-                        } else {
-                            ioScope.launch { processLongExposureFrames(frames, style) }
-                        }
-                    }
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
                 }
 
-                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isLongExposureBurstActive = false
-                    onError?.invoke("Long exposure capture failed")
+                    burstAccumulator.onSequenceAborted(burstSessionId)
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Long exposure capture error: ${e.message}")
+            burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isLongExposureBurstActive = false
+            onError?.invoke("Long exposure capture error: ${e.message}")
         }
     }
 
     private fun processLongExposureFrames(frames: List<ByteArray>, style: String, virtualGain: Float = 1.0f) {
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(frames.first())
         if (frames.size < 2 || !NativeEngineBridge.isLoaded) {
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_", exifOrientationDegrees = srcExifDeg)
             return
         }
         try {
@@ -2118,18 +2298,21 @@ class CommixRepository(private val context: Context) {
             var width = 0
             var height = 0
             var accumBuf: ByteBuffer? = null
+            var reusableFrameBuf: ByteBuffer? = null
             var validIdx = 0
 
             for (bytes in frames) {
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                val bmp = decodeBitmapOomSafe(bytes, MULTI_FRAME_MAX_DIM) ?: continue
                 if (width == 0) {
                     width = bmp.width
                     height = bmp.height
                     accumBuf = ByteBuffer.allocateDirect(width * height * 4 * 4)
                         .order(java.nio.ByteOrder.nativeOrder())
+                    reusableFrameBuf = ByteBuffer.allocateDirect(width * height * 4)
                 }
-                if (bmp.width == width && bmp.height == height && accumBuf != null) {
-                    val frameBuf = ByteBuffer.allocateDirect(width * height * 4)
+                val frameBuf = reusableFrameBuf
+                if (bmp.width == width && bmp.height == height && accumBuf != null && frameBuf != null) {
+                    frameBuf.clear()
                     bmp.copyPixelsToBuffer(frameBuf)
                     frameBuf.rewind()
                     accumBuf.rewind()
@@ -2142,7 +2325,8 @@ class CommixRepository(private val context: Context) {
             }
 
             if (accumBuf != null && validIdx >= 2) {
-                val outBuf = ByteBuffer.allocateDirect(width * height * 4)
+                val outBuf = reusableFrameBuf ?: ByteBuffer.allocateDirect(width * height * 4)
+                outBuf.clear()
                 accumBuf.rewind()
                 val ok = NativeEngineBridge.nativeFinalizeLongExposureDirect(accumBuf, outBuf, width * height, 4)
                 if (ok) {
@@ -2157,19 +2341,20 @@ class CommixRepository(private val context: Context) {
                     }
                     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     bmp.copyPixelsFromBuffer(outBuf)
-                    val (finalBmp, rotated) = maybeRotateBitmapForFormat(bmp)
-                    val stream = ByteArrayOutputStream()
                     val q = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-                    PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, q, stream)
+                    val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, q)
+                    val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(bmp, srcExifDeg, resolvedFmt)
+                    val stream = ByteArrayOutputStream()
+                    PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, q, stream)
                     finalBmp.recycle()
-                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_LONGEXP_", pixelsAlreadyRotated = rotated)
+                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_LONGEXP_", exifOrientationDegrees = exifDeg)
                     return
                 }
             }
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_", exifOrientationDegrees = srcExifDeg)
         } catch (t: Throwable) {
             Log.e(TAG, "processLongExposureFrames error: ${t.message}", t)
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_LONGEXP_", exifOrientationDegrees = srcExifDeg)
         }
     }
 
@@ -2178,11 +2363,14 @@ class CommixRepository(private val context: Context) {
      * and composites sharpest Laplacian pixels per position in C++.
      */
     fun takeFocusStackBurst(metadata: ShotMetadata) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
-        if (!reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for focus stacking")
+            return
+        }
 
         val minFocusDist = activeCharacteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         if (minFocusDist <= 0.05f) {
@@ -2191,11 +2379,17 @@ class CommixRepository(private val context: Context) {
         }
 
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
-        isFocusStackBurstActive = true
-        synchronized(focusStackCollector) { focusStackCollector.clear() }
-
         val jpegOrientation = computeJpegOrientation()
         val sliceCount = currentParams.focusStackSlices.coerceIn(3, 8)
+        val burstSessionId = burstAccumulator.begin(expectedCount = sliceCount) { frames ->
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            if (frames.isNotEmpty()) {
+                ioScope.launch { processFocusStackFrames(frames) }
+            } else {
+                onError?.invoke("Focus stack captured no frames")
+            }
+        }
+
         val requests = (0 until sliceCount).map { idx ->
             val fraction = idx.toFloat() / (sliceCount - 1).toFloat()
             val diopters = fraction * minFocusDist
@@ -2214,33 +2408,26 @@ class CommixRepository(private val context: Context) {
             session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    val frames = synchronized(focusStackCollector) {
-                        val copy = focusStackCollector.toList()
-                        focusStackCollector.clear()
-                        copy
-                    }
-                    isFocusStackBurstActive = false
-                    if (frames.isNotEmpty()) {
-                        ioScope.launch { processFocusStackFrames(frames) }
-                    }
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
                 }
 
-                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isFocusStackBurstActive = false
-                    onError?.invoke("Focus stack capture failed")
+                    burstAccumulator.onSequenceAborted(burstSessionId)
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Focus stack error: ${e.message}")
+            burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isFocusStackBurstActive = false
+            onError?.invoke("Focus stack error: ${e.message}")
         }
     }
 
     private fun processFocusStackFrames(frames: List<ByteArray>) {
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(frames.first())
         if (frames.size < 2 || !NativeEngineBridge.isLoaded) {
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_", exifOrientationDegrees = srcExifDeg)
             return
         }
         try {
@@ -2248,7 +2435,7 @@ class CommixRepository(private val context: Context) {
             var width = 0
             var height = 0
             for (bytes in frames) {
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: continue
+                val bmp = decodeBitmapOomSafe(bytes, MULTI_FRAME_MAX_DIM) ?: continue
                 if (width == 0) {
                     width = bmp.width
                     height = bmp.height
@@ -2270,19 +2457,20 @@ class CommixRepository(private val context: Context) {
                     outBuf.rewind()
                     val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                     bmp.copyPixelsFromBuffer(outBuf)
-                    val (finalBmp, rotated) = maybeRotateBitmapForFormat(bmp)
-                    val stream = ByteArrayOutputStream()
                     val q = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-                    PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, q, stream)
+                    val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, q)
+                    val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(bmp, srcExifDeg, resolvedFmt)
+                    val stream = ByteArrayOutputStream()
+                    PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, q, stream)
                     finalBmp.recycle()
-                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_FSTACK_", pixelsAlreadyRotated = rotated)
+                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_FSTACK_", exifOrientationDegrees = exifDeg)
                     return
                 }
             }
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_", exifOrientationDegrees = srcExifDeg)
         } catch (t: Throwable) {
             Log.e(TAG, "processFocusStackFrames error: ${t.message}", t)
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_FSTACK_", exifOrientationDegrees = srcExifDeg)
         }
     }
 
@@ -2291,17 +2479,27 @@ class CommixRepository(private val context: Context) {
      * (Additive / Average / Lighten / Darken).
      */
     private fun takeMultiExposureBurst(metadata: ShotMetadata) {
-        val session = sessionManager.activeSession ?: return
-        val device = sessionManager.activeDevice ?: return
-        val reader = stillReader ?: return
-        val handler = cameraHandler ?: return
-        if (!reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) return
+        val session = sessionManager.activeSession
+        val device = sessionManager.activeDevice
+        val reader = stillReader
+        val handler = cameraHandler
+        if (session == null || device == null || reader == null || handler == null || !reader.surface.isValid || sessionManager.state != CameraState.ACTIVE_PREVIEW) {
+            onError?.invoke("Camera hardware not ready for multi-exposure")
+            return
+        }
 
         sessionManager.transitionTo(CameraState.CAPTURING_STILL)
-        isMultiExposureBurstActive = true
-        synchronized(multiExposureCollector) { multiExposureCollector.clear() }
-
         val jpegOrientation = computeJpegOrientation()
+        val mode = currentParams.multiExposureMode
+        val burstSessionId = burstAccumulator.begin(expectedCount = 2) { frames ->
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            if (frames.isNotEmpty()) {
+                ioScope.launch { processMultiExposureFrames(frames, mode) }
+            } else {
+                onError?.invoke("Multi-exposure captured no frames")
+            }
+        }
+
         val requests = List(2) {
             device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
@@ -2316,39 +2514,31 @@ class CommixRepository(private val context: Context) {
             session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureSequenceCompleted(session: CameraCaptureSession, sequenceId: Int, frameNumber: Long) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    val frames = synchronized(multiExposureCollector) {
-                        val copy = multiExposureCollector.toList()
-                        multiExposureCollector.clear()
-                        copy
-                    }
-                    isMultiExposureBurstActive = false
-                    if (frames.isNotEmpty()) {
-                        val mode = currentParams.multiExposureMode
-                        ioScope.launch { processMultiExposureFrames(frames, mode) }
-                    }
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
                 }
 
-                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                override fun onCaptureSequenceAborted(session: CameraCaptureSession, sequenceId: Int) {
                     sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-                    isMultiExposureBurstActive = false
-                    onError?.invoke("Multi-exposure capture failed")
+                    burstAccumulator.onSequenceAborted(burstSessionId)
                 }
             }, handler)
         } catch (e: Exception) {
             Log.e(TAG, "Multi-exposure capture error: ${e.message}")
+            burstAccumulator.cancel()
             sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
-            isMultiExposureBurstActive = false
+            onError?.invoke("Multi-exposure capture error: ${e.message}")
         }
     }
 
     private fun processMultiExposureFrames(frames: List<ByteArray>, mode: String) {
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(frames.first())
         if (frames.size < 2 || !NativeEngineBridge.isLoaded) {
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_", exifOrientationDegrees = srcExifDeg)
             return
         }
         try {
-            val bmp1 = BitmapFactory.decodeByteArray(frames[0], 0, frames[0].size)
-            val bmp2 = BitmapFactory.decodeByteArray(frames[1], 0, frames[1].size)
+            val bmp1 = decodeBitmapOomSafe(frames[0], MULTI_FRAME_MAX_DIM)
+            val bmp2 = decodeBitmapOomSafe(frames[1], MULTI_FRAME_MAX_DIM)
             if (bmp1 != null && bmp2 != null && bmp1.width == bmp2.width && bmp1.height == bmp2.height) {
                 val w = bmp1.width
                 val h = bmp1.height
@@ -2371,40 +2561,51 @@ class CommixRepository(private val context: Context) {
                     out.rewind()
                     val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                     comp.copyPixelsFromBuffer(out)
-                    val (finalBmp, rotated) = maybeRotateBitmapForFormat(comp)
-                    val stream = ByteArrayOutputStream()
                     val q = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-                    PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, q, stream)
+                    val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, q)
+                    val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(comp, srcExifDeg, resolvedFmt)
+                    val stream = ByteArrayOutputStream()
+                    PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, q, stream)
                     finalBmp.recycle()
-                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_MULTI_", pixelsAlreadyRotated = rotated)
+                    saveStillBytes(stream.toByteArray(), isNight = false, customPrefix = "COMMIX_MULTI_", exifOrientationDegrees = exifDeg)
                     return
                 }
             } else {
                 bmp1?.recycle(); bmp2?.recycle()
             }
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_", exifOrientationDegrees = srcExifDeg)
         } catch (t: Throwable) {
             Log.e(TAG, "processMultiExposureFrames error: ${t.message}", t)
-            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_")
+            saveStillBytes(frames.first(), isNight = false, customPrefix = "COMMIX_MULTI_", exifOrientationDegrees = srcExifDeg)
         }
     }
 
-    private fun maybeRotateBitmapForFormat(bitmap: Bitmap): Pair<Bitmap, Boolean> {
-        val orientation = computeJpegOrientation()
-        if (!OrientationPolicy.requiresPixelRotation(currentParams.photoFormat) || orientation == 0) {
-            return Pair(bitmap, false)
+    /**
+     * Rotates [bitmap] pixels only when the source Camera2 JPEG carried an unapplied EXIF rotation
+     * AND [resolvedFormat] requires pixel rotation; returns `(resultingBitmap, exifDegreesToWrite)`.
+     * Prevents double-rotation on Camera2 HALs that already pixel-rotate JPEGs (EXIF = 1 / 0°).
+     */
+    private fun maybeRotateBitmapForFormat(
+        bitmap: Bitmap,
+        sourceExifDegrees: Int,
+        resolvedFormat: String
+    ): Pair<Bitmap, Int> {
+        val (pixelRot, exifRot) = OrientationPolicy.resolvePostProcessOrientation(sourceExifDegrees, resolvedFormat)
+        if (pixelRot == 0) {
+            return Pair(bitmap, exifRot)
         }
         return try {
-            val matrix = Matrix().apply { postRotate(orientation.toFloat()) }
+            val matrix = Matrix().apply { postRotate(pixelRot.toFloat()) }
             val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
             if (rotated !== bitmap) bitmap.recycle()
-            Pair(rotated, true)
+            Pair(rotated, exifRot)
         } catch (_: Throwable) {
-            Pair(bitmap, false)
+            Pair(bitmap, sourceExifDegrees)
         }
     }
 
-    private fun processToneAndGrain(jpegBytes: ByteArray): Pair<ByteArray, Boolean> {
+    private fun processToneAndGrain(jpegBytes: ByteArray): Pair<ByteArray, Int> {
+        val srcExifDeg = OrientationPolicy.readExifRotationDegrees(jpegBytes)
         val curve = currentParams.toneCurve.lowercase()
         val grain = currentParams.filmGrain.lowercase()
         val lut = currentParams.lutLook.lowercase()
@@ -2417,15 +2618,34 @@ class CommixRepository(private val context: Context) {
             expRangeNs = currentParams.exposureTimeRangeNs
         )
         val virtualIsoGain = extPlan.virtualIsoGain
-        val isNonDefaultFormat = currentParams.photoFormat.lowercase() != "jpeg" && currentParams.photoFormat.lowercase() != "jpg"
+        val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
+        val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, effectiveQuality)
+        val isNonDefaultFormat = resolvedFmt != "jpeg" && resolvedFmt != "jpg"
+        val stillStabPlan = StabilizationPolicyEngine.resolve(
+            engineModeRaw = currentParams.stabilizationEngineMode,
+            applyWhenRaw = currentParams.stabilizationApplyWhen,
+            phase = StabilizationPolicyEngine.CapturePhase.STILL_CAPTURE,
+            activeCameraMode = currentParams.activeMode,
+            caps = StabilizationPolicyEngine.HardwareCapabilities(
+                hasOis = currentParams.hasOisHardware,
+                hasEis = currentParams.hasEisHardware,
+                hasPreviewStabilization = currentParams.hasPreviewStabilizationHardware,
+                apiLevel = Build.VERSION.SDK_INT
+            ),
+            photoAutoLevelEnabled = currentParams.photoAutoLevelEnabled,
+            gyroflowExportEnabled = currentParams.gyroflowExportEnabled
+        )
+        val rollForAutoLevel = captureRollDegSnapshot
+        val needsAutoLevel = stillStabPlan.shouldApplyStillAutoLevel &&
+            kotlin.math.abs(rollForAutoLevel) >= StabilizationPolicyEngine.AUTO_LEVEL_DEADBAND_DEG
         val isEnhanceActive = enhance in listOf("aether_master", "clarity", "detail", "unsharp", "super_res")
-        val needsProcessing = (curve != "neutral" || grain != "off" || (lut.isNotEmpty() && lut != "none") || isEnhanceActive || lensCorr || isNonDefaultFormat || virtualIsoGain > 1.02f)
-        if (!needsProcessing) return Pair(jpegBytes, false)
-        if (!NativeEngineBridge.isLoaded && !isNonDefaultFormat) return Pair(jpegBytes, false)
+        val needsProcessing = (curve != "neutral" || grain != "off" || (lut.isNotEmpty() && lut != "none") || isEnhanceActive || lensCorr || isNonDefaultFormat || virtualIsoGain > 1.02f || needsAutoLevel)
+        if (!needsProcessing) return Pair(jpegBytes, srcExifDeg)
+        if (!NativeEngineBridge.isLoaded && !isNonDefaultFormat && !needsAutoLevel) return Pair(jpegBytes, srcExifDeg)
 
         try {
-            val opts = BitmapFactory.Options().apply { inMutable = true }
-            val mutableBmp = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, opts) ?: return Pair(jpegBytes, false)
+            val mutableBmp = decodeBitmapOomSafe(jpegBytes, maxDimension = 6144, mutable = true)
+                ?: return Pair(jpegBytes, srcExifDeg)
             val w = mutableBmp.width
             val h = mutableBmp.height
 
@@ -2590,15 +2810,129 @@ class CommixRepository(private val context: Context) {
                 mutableBmp.copyPixelsFromBuffer(directBuf)
             }
 
-            val (finalBmp, rotated) = maybeRotateBitmapForFormat(mutableBmp)
+            var workingBmp = mutableBmp
+            var workingExifDeg = srcExifDeg
+            if (needsAutoLevel) {
+                // First bake any unapplied EXIF rotation so roll straightening operates in upright coordinates
+                if (workingExifDeg != 0) {
+                    val rotM = Matrix().apply { postRotate(workingExifDeg.toFloat()) }
+                    val upright = Bitmap.createBitmap(workingBmp, 0, 0, workingBmp.width, workingBmp.height, rotM, true)
+                    if (upright !== workingBmp) workingBmp.recycle()
+                    workingBmp = upright
+                    workingExifDeg = 0
+                }
+                val leveled = applySoftwareAutoLevel(workingBmp, rollForAutoLevel)
+                if (leveled !== workingBmp) workingBmp.recycle()
+                workingBmp = leveled
+            }
+
+            val (finalBmp, exifDeg) = maybeRotateBitmapForFormat(workingBmp, workingExifDeg, resolvedFmt)
             val stream = ByteArrayOutputStream()
-            val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
-            PhotoFormatEngine.encodeBitmap(finalBmp, currentParams.photoFormat, effectiveQuality, stream)
+            PhotoFormatEngine.encodeBitmap(finalBmp, resolvedFmt, effectiveQuality, stream)
             finalBmp.recycle()
-            return Pair(stream.toByteArray(), rotated)
+            return Pair(stream.toByteArray(), exifDeg)
         } catch (t: Throwable) {
             Log.e(TAG, "processToneAndGrain error: ${t.message}")
-            return Pair(jpegBytes, false)
+            return Pair(jpegBytes, srcExifDeg)
+        }
+    }
+
+    /**
+     * Software Photo Auto-Level Horizon Straightening:
+     * Counter-rotates the image by clamped IMU [rollDeg] (up to ±20°) and crops to the exact
+     * largest inscribed rectangle computed by [StabilizationPolicyEngine.computeInscribedCropRect]
+     * so horizons are perfectly level with zero black corner wedges.
+     */
+    private fun applySoftwareAutoLevel(src: Bitmap, rollDeg: Float): Bitmap {
+        val clampedRoll = rollDeg.coerceIn(
+            -StabilizationPolicyEngine.AUTO_LEVEL_MAX_DEG,
+            StabilizationPolicyEngine.AUTO_LEVEL_MAX_DEG
+        )
+        val crop = StabilizationPolicyEngine.computeInscribedCropRect(src.width, src.height, clampedRoll)
+        if (crop.width <= 0 || crop.height <= 0 || (crop.width == src.width && crop.height == src.height)) {
+            return src
+        }
+        return try {
+            val out = Bitmap.createBitmap(crop.width, crop.height, Bitmap.Config.ARGB_8888)
+            val canvas = android.graphics.Canvas(out)
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+            canvas.save()
+            canvas.translate(crop.width / 2f, crop.height / 2f)
+            canvas.rotate(-clampedRoll)
+            canvas.translate(-src.width / 2f, -src.height / 2f)
+            canvas.drawBitmap(src, 0f, 0f, paint)
+            canvas.restore()
+            out
+        } catch (_: Throwable) {
+            src
+        }
+    }
+
+    /**
+     * Captures a high-speed continuous photo burst of [shotCount] frames (3 / 5 / 10) using
+     * Camera2 `captureBurst` coordinated cleanly via [burstAccumulator], saving each frame.
+     */
+    fun takeContinuousBurst(metadata: ShotMetadata, shotCount: Int) {
+        val count = shotCount.coerceIn(2, 10)
+        val device = sessionManager.activeDevice
+        val session = sessionManager.activeSession
+        val reader = stillReader
+        val handler = cameraHandler
+        if (device == null || session == null || reader == null || handler == null) {
+            onError?.invoke("Camera not ready for continuous burst")
+            return
+        }
+        if (!reader.surface.isValid) {
+            onError?.invoke("Capture surface unavailable for burst")
+            return
+        }
+        captureRollDegSnapshot = sensorHub.currentRollDeg.toFloat()
+        sessionManager.transitionTo(CameraState.CAPTURING_STILL)
+
+        val burstSessionId = burstAccumulator.begin(expectedCount = count) { frames ->
+            ioScope.launch {
+                try {
+                    if (frames.isEmpty()) {
+                        onError?.invoke("Burst capture returned no frames")
+                        return@launch
+                    }
+                    frames.forEachIndexed { idx, bytes ->
+                        val (processed, exifDeg) = processToneAndGrain(bytes)
+                        saveStillBytes(processed, metadata, exifOrientationDegrees = exifDeg)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Continuous burst save failed: ${e.message}")
+                    onError?.invoke("Burst save failed: ${e.message}")
+                }
+            }
+        }
+
+        try {
+            val jpegOrientation = computeJpegOrientation()
+            val stillParams = currentParams.copy(isCapturePhaseActive = true, isVideoRecordingPhase = false)
+            val requests = (0 until count).map {
+                device.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
+                    addTarget(reader.surface)
+                    CaptureRequestFactory.applyControls(this, stillParams)
+                    set(CaptureRequest.JPEG_QUALITY, metadata.compressionQuality.coerceIn(50, 100).toByte())
+                    set(CaptureRequest.JPEG_ORIENTATION, jpegOrientation)
+                }.build()
+            }
+            session.captureBurst(requests, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureSequenceCompleted(s: CameraCaptureSession, seqId: Int, frameNum: Long) {
+                    sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+                    burstAccumulator.onSequenceCompleted(burstSessionId)
+                }
+
+                override fun onCaptureSequenceAborted(s: CameraCaptureSession, seqId: Int) {
+                    sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+                    burstAccumulator.onSequenceAborted(burstSessionId)
+                }
+            }, handler)
+        } catch (e: Exception) {
+            burstAccumulator.cancel()
+            sessionManager.transitionTo(CameraState.ACTIVE_PREVIEW)
+            onError?.invoke("Burst capture failed: ${e.message}")
         }
     }
 
@@ -2661,21 +2995,23 @@ class CommixRepository(private val context: Context) {
         bytes: ByteArray,
         isNight: Boolean = false,
         customPrefix: String? = null,
-        pixelsAlreadyRotated: Boolean = false
+        exifOrientationDegrees: Int = 0
     ) {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timeStamp = nextUniqueTimestamp()
         val prefix = customPrefix ?: if (isNight) "COMMIX_NIGHT_" else "COMMIX_"
-        val ext = PhotoFormatEngine.getExtension(currentParams.photoFormat)
-        val mime = PhotoFormatEngine.getMimeType(currentParams.photoFormat)
+        val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
+        val resolvedFmt = PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, effectiveQuality)
+        val ext = PhotoFormatEngine.getExtension(resolvedFmt)
+        val mime = PhotoFormatEngine.getMimeType(resolvedFmt)
         val fileName = "$prefix$timeStamp$ext"
 
         val tempFile = File(context.cacheDir, "temp_$fileName")
         try {
             tempFile.writeBytes(bytes)
-            if (ext in listOf(".jpg", ".jpeg", ".heic", ".png", ".webp", ".dng")) {
+            if (ext in listOf(".jpg", ".jpeg", ".png", ".webp")) {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                val orientation = if (pixelsAlreadyRotated) 0 else computeJpegOrientation()
+                val orientation = OrientationPolicy.quantizeDegrees(exifOrientationDegrees)
                 val meta = buildRichShotMetadata(width = bounds.outWidth.coerceAtLeast(0), height = bounds.outHeight.coerceAtLeast(0))
                 ExifWriter.writeMetadata(tempFile, orientation, meta, exifOptions)
             }
@@ -2752,10 +3088,12 @@ class CommixRepository(private val context: Context) {
     }
 
     fun savePanoramaImage(bytes: ByteArray, is360: Boolean, onSaved: ((Uri) -> Unit)? = null) {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timeStamp = nextUniqueTimestamp()
         val prefix = if (is360) "COMMIX_360_" else "COMMIX_PANO_"
-        val ext = if (is360) ".jpg" else PhotoFormatEngine.getExtension(currentParams.photoFormat)
-        val mime = if (is360) "image/jpeg" else PhotoFormatEngine.getMimeType(currentParams.photoFormat)
+        val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality.coerceIn(1, 100)
+        val resolvedFmt = if (is360) PhotoFormatEngine.FORMAT_JPEG else PhotoFormatEngine.resolveOutputFormat(currentParams.photoFormat, effectiveQuality)
+        val ext = PhotoFormatEngine.getExtension(resolvedFmt)
+        val mime = PhotoFormatEngine.getMimeType(resolvedFmt)
         val fileName = "$prefix$timeStamp$ext"
 
         val finalBytes = if (!is360 && ext != ".jpg" && ext != ".jpeg") {
@@ -2763,8 +3101,7 @@ class CommixRepository(private val context: Context) {
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 if (bmp != null) {
                     val bos = ByteArrayOutputStream()
-                    val effectiveQuality = if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality
-                    PhotoFormatEngine.encodeBitmap(bmp, currentParams.photoFormat, effectiveQuality, bos)
+                    PhotoFormatEngine.encodeBitmap(bmp, resolvedFmt, effectiveQuality, bos)
                     bmp.recycle()
                     bos.toByteArray()
                 } else {
@@ -2780,7 +3117,7 @@ class CommixRepository(private val context: Context) {
         val tempFile = File(context.cacheDir, "temp_$fileName")
         try {
             tempFile.writeBytes(finalBytes)
-            if (ext in listOf(".jpg", ".jpeg", ".heic", ".png", ".webp", ".dng")) {
+            if (ext in listOf(".jpg", ".jpeg", ".png", ".webp")) {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(finalBytes, 0, finalBytes.size, bounds)
                 val meta = buildRichShotMetadata(
@@ -2792,6 +3129,13 @@ class CommixRepository(private val context: Context) {
                     compressionQuality = if (is360) 95 else if (PhotoFormatEngine.isLossless(currentParams.photoFormat, currentParams.photoQuality)) 100 else currentParams.photoQuality
                 )
                 ExifWriter.writeMetadata(tempFile, 0, meta, exifOptions)
+                // ExifInterface.saveAttributes rewrites APP1 segments and can strip GPano XMP;
+                // re-inject Photo Sphere XMP afterward so Google Photos / VR viewers recognize 360° spheres.
+                if (is360 && tempFile.exists() && bounds.outWidth > 0 && bounds.outHeight > 0) {
+                    val withExif = tempFile.readBytes()
+                    val withXmp = PanoramaStitcher.injectGPhotoSphereXmp(withExif, bounds.outWidth, bounds.outHeight)
+                    tempFile.writeBytes(withXmp)
+                }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed embedding EXIF into panorama temp file: ${e.message}")
@@ -2871,7 +3215,7 @@ class CommixRepository(private val context: Context) {
         poseHeadingDeg: Float = 0f,
         onSaved: ((Uri) -> Unit)? = null
     ) {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val timeStamp = nextUniqueTimestamp()
         val prefix = if (fov == SpatialFov.SPATIAL_360) "COMMIX_SPATIAL_360_" else "COMMIX_SPATIAL_180_"
         val fileName = "$prefix$timeStamp.jpg"
 
@@ -3052,8 +3396,12 @@ class CommixRepository(private val context: Context) {
     }
 
     fun release() {
+        burstAccumulator.cancel()
         pauseCamera()
         audioEngine.release()
+        imageReaderThread?.quitSafely()
+        imageReaderThread = null
+        imageReaderHandler = null
         cameraThread?.quitSafely()
         cameraThread = null
         cameraHandler = null

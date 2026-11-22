@@ -47,7 +47,7 @@ class UniversalSettingsAndExifTest {
         assertEquals(8, state.nightFrameCount)
         assertEquals(120, state.slowMoFps)
         assertEquals(2, state.timeLapseIntervalSec)
-        assertEquals("timer", state.automationTriggerMode)
+        assertEquals("timer_3s", state.automationTriggerMode)
         assertEquals(2, state.queueWorkerThreads)
     }
 

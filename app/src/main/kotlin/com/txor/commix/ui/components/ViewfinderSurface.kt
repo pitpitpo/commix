@@ -38,6 +38,8 @@ fun ViewfinderSurface(
     val lifecycleOwner = LocalLifecycleOwner.current
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
     var currentSurface by remember { mutableStateOf<Surface?>(null) }
+    var lastBufferW by remember { mutableStateOf(0) }
+    var lastBufferH by remember { mutableStateOf(0) }
 
     fun buildTransform(vWidth: Int, vHeight: Int): Matrix {
         val transformMatrix = Matrix()
@@ -47,8 +49,13 @@ fun ViewfinderSurface(
 
         // Camera2's SurfaceTexture automatically applies the sensor-orientation
         // transform in hardware to deliver upright frames to TextureView.
-        // We scale the buffer to match the container viewport aspect ratio (portrait: previewHeight / previewWidth).
-        val bufferAspect = previewHeight.toFloat() / previewWidth.toFloat()
+        // Swap width/height only when the sensor is rotated 90°/270° relative to natural portrait.
+        val isRotatedSensor = (sensorOrientation % 180) != 0
+        val bufferAspect = if (isRotatedSensor) {
+            previewHeight.toFloat() / previewWidth.toFloat()
+        } else {
+            previewWidth.toFloat() / previewHeight.toFloat()
+        }
         val viewAspect = vWidth.toFloat() / vHeight.toFloat()
 
         val scaleX: Float
@@ -78,6 +85,8 @@ fun ViewfinderSurface(
                         val st = tv.surfaceTexture
                         if (st != null) {
                             st.setDefaultBufferSize(previewWidth, previewHeight)
+                            lastBufferW = previewWidth
+                            lastBufferH = previewHeight
                             tv.setTransform(buildTransform(tv.width, tv.height))
                             currentSurface?.release()
                             val surf = Surface(st)
@@ -114,6 +123,8 @@ fun ViewfinderSurface(
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
                         st.setDefaultBufferSize(previewWidth, previewHeight)
+                        lastBufferW = previewWidth
+                        lastBufferH = previewHeight
                         applyTransform(width, height)
                         currentSurface?.release()
                         val surface = Surface(st)
@@ -122,7 +133,11 @@ fun ViewfinderSurface(
                     }
 
                     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                        st.setDefaultBufferSize(previewWidth, previewHeight)
+                        if (lastBufferW != previewWidth || lastBufferH != previewHeight) {
+                            st.setDefaultBufferSize(previewWidth, previewHeight)
+                            lastBufferW = previewWidth
+                            lastBufferH = previewHeight
+                        }
                         applyTransform(width, height)
                     }
 
@@ -142,7 +157,11 @@ fun ViewfinderSurface(
         update = { textureView ->
             textureViewRef = textureView
             if (textureView.isAvailable && textureView.width > 0 && textureView.height > 0) {
-                textureView.surfaceTexture?.setDefaultBufferSize(previewWidth, previewHeight)
+                if (lastBufferW != previewWidth || lastBufferH != previewHeight) {
+                    textureView.surfaceTexture?.setDefaultBufferSize(previewWidth, previewHeight)
+                    lastBufferW = previewWidth
+                    lastBufferH = previewHeight
+                }
                 textureView.setTransform(buildTransform(textureView.width, textureView.height))
             }
         },

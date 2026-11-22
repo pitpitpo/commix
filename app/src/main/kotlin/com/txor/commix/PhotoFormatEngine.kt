@@ -91,6 +91,34 @@ object PhotoFormatEngine {
     }
 
     /**
+     * Checks whether the current Android runtime exposes `Bitmap.CompressFormat.HEIF`.
+     */
+    fun isHeicEncodingSupported(): Boolean {
+        return try {
+            Bitmap.CompressFormat.valueOf("HEIF") != null
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /**
+     * Resolves the actual container format that [encodeBitmap] will produce so file extensions
+     * and MediaStore MIME types always match the encoded byte stream (preventing unreadable
+     * `.heic` files containing JPEG/PNG payloads on runtimes without HEIF Bitmap encoding).
+     */
+    fun resolveOutputFormat(
+        requestedFormat: String,
+        quality: Int = 95,
+        heicSupported: Boolean = isHeicEncodingSupported()
+    ): String {
+        val norm = requestedFormat.lowercase()
+        if ((norm == FORMAT_HEIC || norm == "heif") && !heicSupported) {
+            return if (quality >= 100) FORMAT_PNG else FORMAT_JPEG
+        }
+        return norm
+    }
+
+    /**
      * Encodes a [Bitmap] to [output] using the specified format and quality settings.
      * When quality is 100% or an uncompressed format is selected, compression is bypassed or maxed out.
      */
@@ -101,7 +129,7 @@ object PhotoFormatEngine {
         output: OutputStream
     ) {
         val clampedQuality = quality.coerceIn(1, 100)
-        when (format.lowercase()) {
+        when (resolveOutputFormat(format, clampedQuality)) {
             FORMAT_LOSSLESS, "bmp" -> {
                 writeUncompressedBmp(bitmap, output)
             }

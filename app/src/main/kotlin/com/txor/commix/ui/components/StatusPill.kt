@@ -16,12 +16,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.txor.commix.ui.theme.AppleYellow
+import com.txor.commix.ui.theme.*
 import kotlinx.coroutines.delay
 
 @Composable
@@ -54,8 +53,8 @@ fun StatusPill(
             modifier = Modifier
                 .widthIn(max = 360.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xEE1C1C1E))
-                .border(1.0.dp, AppleYellow.copy(alpha = 0.7f), RoundedCornerShape(16.dp))
+                .background(CinemaGlass)
+                .border(1.0.dp, AppleYellow.copy(alpha = 0.72f), RoundedCornerShape(16.dp))
                 .padding(horizontal = 12.dp, vertical = 7.dp)
         ) {
             Row(
@@ -70,7 +69,7 @@ fun StatusPill(
                 )
                 Text(
                     text = message ?: "",
-                    color = Color.White,
+                    color = CinemaTextLight,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 0.25.sp,
@@ -83,6 +82,7 @@ fun StatusPill(
                     modifier = Modifier
                         .size(24.dp)
                         .clip(CircleShape)
+                        .background(CinemaSubtleBg)
                         .clickable {
                             visible = false
                             onDismiss()
@@ -91,8 +91,8 @@ fun StatusPill(
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Dismiss",
-                        tint = Color.Gray,
-                        modifier = Modifier.size(14.dp)
+                        tint = CinemaTextDim,
+                        modifier = Modifier.size(13.dp)
                     )
                 }
             }

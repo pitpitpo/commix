@@ -6,182 +6,79 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaGreen
-import com.txor.commix.ui.theme.CinemaTextLight
-
-data class AutomationPreset(
-    val id: String,
-    val title: String,
-    val description: String,
-    val icon: String,
-    val durationSeconds: Float,
-    val applyPreset: () -> Unit
-)
+import com.txor.commix.automation.AutomationEngine
+import com.txor.commix.automation.AutomationPresetConfig
+import com.txor.commix.ui.components.CommixBadgePill
+import com.txor.commix.ui.components.CommixModalBottomSheet
+import com.txor.commix.ui.components.CommixPrimaryButton
+import com.txor.commix.ui.components.CommixSheetHeader
+import com.txor.commix.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun KeyframeEditorModal(
     activePresetId: String,
-    onSelectPreset: (AutomationPreset) -> Unit,
+    onSelectPreset: (AutomationPresetConfig) -> Unit,
     onArmShot: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val presets = remember {
-        listOf(
-            AutomationPreset(
-                id = "dolly_zoom",
-                title = "Dolly Zoom (Vertigo)",
-                description = "Smooth zoom in from 1.0x to 3.2x while pulling focus forward",
-                icon = "🔍",
-                durationSeconds = 8.0f,
-                applyPreset = {
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeReset()
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(0, 0f, 1.0f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(0, 8f, 3.2f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 0f, 0.2f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 8f, 0.8f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeStart(8.0f)
-                }
-            ),
-            AutomationPreset(
-                id = "sunrise_ramp",
-                title = "Sunrise EV Ramp",
-                description = "Gradual exposure transition from -1.5 EV to +1.0 EV",
-                icon = "🌅",
-                durationSeconds = 20.0f,
-                applyPreset = {
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeReset()
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(3, 0f, -1.5f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(3, 20f, 1.0f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeStart(20.0f)
-                }
-            ),
-            AutomationPreset(
-                id = "golden_hour",
-                title = "Golden Hour WB Drift",
-                description = "Smooth color temp drift from 3200K tungsten to 5600K daylight",
-                icon = "✨",
-                durationSeconds = 15.0f,
-                applyPreset = {
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeReset()
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(4, 0f, 3200f, 1)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(4, 15f, 5600f, 1)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeStart(15.0f)
-                }
-            ),
-            AutomationPreset(
-                id = "reveal_shot",
-                title = "Cinematic Reveal",
-                description = "Start zoomed-in (4.0x) on subject, smoothly pull out to wide (1.0x)",
-                icon = "🎬",
-                durationSeconds = 10.0f,
-                applyPreset = {
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeReset()
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(0, 0f, 4.0f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(0, 10f, 1.0f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 0f, 0.1f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 10f, 0.9f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeStart(10.0f)
-                }
-            ),
-            AutomationPreset(
-                id = "dramatic_rack",
-                title = "Dramatic Rack Focus",
-                description = "Snap rack focus from foreground subject to background with 2s hold",
-                icon = "🎯",
-                durationSeconds = 9.0f,
-                applyPreset = {
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeReset()
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 0f, 0.2f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 3.5f, 0.2f, 0)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 5.5f, 0.85f, 3)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeAddPoint(5, 9.0f, 0.85f, 0)
-                    com.txor.commix.bridge.NativeEngineBridge.nativeKeyframeStart(9.0f)
-                }
-            )
-        )
-    }
-
-    var selectedPreset by remember {
+    val presets = AutomationEngine.BUILT_IN_PRESETS
+    var selectedPreset by remember(activePresetId) {
         mutableStateOf(presets.find { it.id == activePresetId } ?: presets.first())
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = CinemaCardDark,
-        dragHandle = { BottomSheetDefaults.DragHandle(color = Color.Gray) }
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(horizontal = 18.dp, vertical = 6.dp)
                 .navigationBarsPadding()
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
-            ) {
-                Text(
-                    text = "AUTOMATION PRESETS",
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    color = AppleYellow,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Box(
-                    contentAlignment = Alignment.Center,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color(0x1AFFFFFF))
-                        .clickable { onDismiss() }
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Color.Gray,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
+            CommixSheetHeader(
+                title = "Keyframe Presets",
+                subtitle = "C++20 cubic keyframe motion curves",
+                icon = Icons.Default.Timeline,
+                iconTint = AppleYellow,
+                badgeText = "${presets.size} CURVES",
+                onDismiss = onDismiss
+            )
 
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.fillMaxWidth().heightIn(max = 340.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
             ) {
-                items(presets) { preset ->
+                items(presets, key = { it.id }) { preset ->
                     val isSelected = (preset.id == selectedPreset.id)
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Color(0x33FFD60A) else Color(0x1AFFFFFF))
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isSelected) AppleYellow.copy(alpha = 0.16f) else CinemaSurface)
                             .border(
-                                width = if (isSelected) 1.2.dp else 0.8.dp,
-                                color = if (isSelected) AppleYellow else Color(0x22FFFFFF),
-                                shape = RoundedCornerShape(12.dp)
+                                width = if (isSelected) 1.4.dp else 0.8.dp,
+                                color = if (isSelected) AppleYellow else CinemaGlassBorder,
+                                shape = RoundedCornerShape(14.dp)
                             )
+                            .testTag("keyframe_preset_${preset.id}")
                             .clickable {
                                 selectedPreset = preset
                                 onSelectPreset(preset)
@@ -200,24 +97,39 @@ fun KeyframeEditorModal(
                                 Text(text = preset.icon, fontSize = 22.sp)
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = preset.title,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 13.5.sp,
+                                            color = if (isSelected) AppleYellow else CinemaTextLight,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        CommixBadgePill(
+                                            text = "${preset.durationSeconds.toInt()}s",
+                                            accentColor = AppleYellow,
+                                            monospace = true
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(3.dp))
                                     Text(
-                                        text = preset.title,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.5.sp,
-                                        color = if (isSelected) AppleYellow else Color.White
-                                    )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = "${preset.description} (${preset.durationSeconds.toInt()}s)",
+                                        text = preset.description,
                                         fontSize = 11.sp,
-                                        color = CinemaTextLight
+                                        color = CinemaTextDim,
+                                        lineHeight = 15.sp
                                     )
                                 }
                             }
                             if (isSelected) {
+                                Spacer(modifier = Modifier.width(8.dp))
                                 Icon(
                                     imageVector = Icons.Default.Check,
-                                    contentDescription = null,
+                                    contentDescription = "Selected keyframe preset",
                                     tint = AppleYellow,
                                     modifier = Modifier.size(18.dp)
                                 )
@@ -227,35 +139,20 @@ fun KeyframeEditorModal(
                 }
             }
 
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // Arm Shot Button
-            Button(
+            CommixPrimaryButton(
+                text = "ARM ${selectedPreset.title.uppercase()}",
+                icon = Icons.Default.PlayArrow,
+                testTagName = "arm_automation_button",
                 onClick = {
-                    selectedPreset.applyPreset()
+                    AutomationEngine.programNativeBridge(selectedPreset)
+                    onSelectPreset(selectedPreset)
                     onArmShot()
                     onDismiss()
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = AppleYellow),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().height(48.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = Color.Black,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "ARM AUTOMATION SHOT",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp
-                    )
                 }
-            }
+            )
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }

@@ -25,14 +25,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaAmber
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.theme.*
 import java.util.Locale
 
 enum class ProControlTab {
-    ZOOM, ISO, SHUTTER, ANGLE, EV, WB, FOCUS, CURVE, GRAIN, LUT, PROCESS_ZERO, AUDIO, ND, ANAMORPHIC, AEB, COMP, SCOPES
+    ZOOM, ISO, SHUTTER, ANGLE, EV, WB, FOCUS, CURVE, GRAIN, LUT, PROCESS_ZERO, AUDIO, ND, ANAMORPHIC, AEB, COMP, SCOPES, PRESETS
 }
 
 @Composable
@@ -102,6 +99,27 @@ fun ProSettingsCards(
     onToggleHorizon: () -> Unit = {},
     showGrid: Boolean = false,
     onToggleGrid: () -> Unit = {},
+    showZebras: Boolean = false,
+    zebraThresholdIre: Int = 95,
+    onToggleZebras: () -> Unit = {},
+    onCycleZebraThreshold: () -> Unit = {},
+    showFalseColor: Boolean = false,
+    onToggleFalseColor: () -> Unit = {},
+    showSafeAreaGuides: Boolean = false,
+    onToggleSafeAreaGuides: () -> Unit = {},
+    focusPointA: Float? = null,
+    focusPointB: Float? = null,
+    focusPullDurationSec: Float = 2.0f,
+    isFocusPullRunning: Boolean = false,
+    onSetFocusPointA: () -> Unit = {},
+    onSetFocusPointB: () -> Unit = {},
+    onClearFocusPullPoints: () -> Unit = {},
+    onSetFocusPullDuration: (Float) -> Unit = {},
+    onTriggerFocusPull: (Boolean) -> Unit = {},
+    savedCustomSlots: Set<Int> = emptySet(),
+    activeCustomSlot: Int = 0,
+    onSaveCustomPreset: (Int) -> Unit = {},
+    onLoadCustomPreset: (Int) -> Unit = {},
     aeAfLocked: Boolean = false,
     onToggleAeAfLock: () -> Unit = {},
     lensCorrectionEnabled: Boolean = false,
@@ -135,6 +153,7 @@ fun ProSettingsCards(
                     ProControlTab.PROCESS_ZERO -> "P0"
                     ProControlTab.SHUTTER -> "S"
                     ProControlTab.FOCUS -> "F"
+                    ProControlTab.PRESETS -> "C1-3"
                     else -> tab.name
                 }
                 Box(
@@ -165,9 +184,9 @@ fun ProSettingsCards(
         ) {
             when (activeTab) {
                 ProControlTab.ZOOM -> {
+                    val safeMaxZoom = maxZoom.toFloat().coerceAtLeast(1.0f)
                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         val zoomSteps = listOf(
-                            0.5 to "13mm (0.5×)",
                             1.0 to "24mm (1.0×)",
                             1.5 to "35mm (1.5×)",
                             2.0 to "48mm (2.0×)",
@@ -185,15 +204,15 @@ fun ProSettingsCards(
                                 Box(
                                     contentAlignment = Alignment.Center,
                                     modifier = Modifier
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(if (isSel) AppleYellow else Color(0x1AFFFFFF))
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isSel) AppleYellow else CinemaSurfaceElevated)
                                         .clickable { onZoomSelected(z) }
-                                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
                                 ) {
                                     Text(
                                         text = label,
-                                        color = if (isSel) Color.Black else CinemaTextLight,
-                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSel) CinemaBlack else CinemaTextLight,
+                                        fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
                                         fontSize = 11.sp
                                     )
                                 }
@@ -204,23 +223,23 @@ fun ProSettingsCards(
                                     Box(
                                         contentAlignment = Alignment.Center,
                                         modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(if (spaceZoomLock) AppleYellow else Color(0x33FFD60A))
-                                            .border(0.8.dp, AppleYellow, RoundedCornerShape(6.dp))
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .background(if (spaceZoomLock) AppleYellow else AppleYellow.copy(alpha = 0.20f))
+                                            .border(0.8.dp, AppleYellow, RoundedCornerShape(8.dp))
                                             .clickable { onToggleSpaceZoomLock() }
-                                            .padding(horizontal = 9.dp, vertical = 5.dp)
+                                            .padding(horizontal = 10.dp, vertical = 6.dp)
                                     ) {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             Icon(
                                                 imageVector = Icons.Default.Lock,
                                                 contentDescription = null,
-                                                tint = if (spaceZoomLock) Color.Black else AppleYellow,
+                                                tint = if (spaceZoomLock) CinemaBlack else AppleYellow,
                                                 modifier = Modifier.size(11.dp)
                                             )
                                             Spacer(modifier = Modifier.width(3.dp))
                                             Text(
                                                 text = "ZOOM LOCK",
-                                                color = if (spaceZoomLock) Color.Black else AppleYellow,
+                                                color = if (spaceZoomLock) CinemaBlack else AppleYellow,
                                                 fontWeight = FontWeight.Bold,
                                                 fontSize = 10.sp
                                             )
@@ -230,7 +249,7 @@ fun ProSettingsCards(
                             }
                         }
 
-                        // Continuous Logarithmic Zoom Slider
+                        // Continuous Zoom Slider (clamped safely to hardware range)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.fillMaxWidth()
@@ -243,14 +262,10 @@ fun ProSettingsCards(
                                 modifier = Modifier.width(42.dp)
                             )
                             Slider(
-                                value = currentZoom.toFloat(),
+                                value = currentZoom.toFloat().coerceIn(1.0f, safeMaxZoom),
                                 onValueChange = { onZoomSelected(it.toDouble()) },
-                                valueRange = 1.0f..maxZoom.toFloat().coerceAtLeast(1.0f),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                valueRange = 1.0f..safeMaxZoom,
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -329,11 +344,7 @@ fun ProSettingsCards(
                                 onValueChange = { sliderIso = it },
                                 onValueChangeFinished = { onIsoSelected(sliderIso.toInt()) },
                                 valueRange = minIso..maxExtendedIso,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = if (isVirtualExtended) CinemaAmber else AppleYellow,
-                                    activeTrackColor = if (isVirtualExtended) CinemaAmber else AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(if (isVirtualExtended) CinemaAmber else AppleYellow),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -456,11 +467,7 @@ fun ProSettingsCards(
                                     onShutterSelected(ns)
                                 },
                                 valueRange = minLog.toFloat()..maxLog.toFloat(),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = if (isVirtualShutter) CinemaAmber else AppleYellow,
-                                    activeTrackColor = if (isVirtualShutter) CinemaAmber else AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(if (isVirtualShutter) CinemaAmber else AppleYellow),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -512,14 +519,10 @@ fun ProSettingsCards(
                                 modifier = Modifier.width(90.dp)
                             )
                             Slider(
-                                value = currentShutterAngle.toFloat(),
+                                value = currentShutterAngle.toFloat().coerceIn(10f, 360f),
                                 onValueChange = { onShutterAngleSelected(it.toDouble()) },
                                 valueRange = 10f..360f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -572,11 +575,7 @@ fun ProSettingsCards(
                                 onValueChange = { sliderEv = it },
                                 onValueChangeFinished = { onEvSelected(sliderEv) },
                                 valueRange = minEv..maxEv,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -635,11 +634,7 @@ fun ProSettingsCards(
                                 onValueChange = { sliderWb = it },
                                 onValueChangeFinished = { onWbSelected(sliderWb.toInt()) },
                                 valueRange = 2000f..10000f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -734,13 +729,68 @@ fun ProSettingsCards(
                                 onValueChange = { sliderFocus = it },
                                 onValueChangeFinished = { onFocusSelected(sliderFocus) },
                                 valueRange = 0f..maxD,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
+                        }
+
+                        // Cinema Motorized Focus Pull A <-> B Bar
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState())
+                        ) {
+                            ScopeTogglePill(
+                                name = if (focusPointA != null) String.format(Locale.US, "A: %.1fD", focusPointA) else "SET A",
+                                active = focusPointA != null,
+                                onToggle = onSetFocusPointA
+                            )
+                            ScopeTogglePill(
+                                name = if (focusPointB != null) String.format(Locale.US, "B: %.1fD", focusPointB) else "SET B",
+                                active = focusPointB != null,
+                                onToggle = onSetFocusPointB
+                            )
+                            val readyPull = focusPointA != null && focusPointB != null
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (isFocusPullRunning) CinemaCyan else if (readyPull) AppleYellow else Color(0x1AFFFFFF))
+                                    .clickable { onTriggerFocusPull(true) }
+                                    .padding(horizontal = 9.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = if (isFocusPullRunning) "PULLING…" else "PULL A→B",
+                                    color = if (readyPull || isFocusPullRunning) Color.Black else CinemaTextDim,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 10.5.sp,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                            if (readyPull) {
+                                ScopeTogglePill(
+                                    name = "PULL B→A",
+                                    active = false,
+                                    onToggle = { onTriggerFocusPull(false) }
+                                )
+                            }
+                            val durations = listOf(1.0f, 2.0f, 3.5f, 5.0f)
+                            val nextDur = durations[(durations.indexOfFirst { kotlin.math.abs(it - focusPullDurationSec) < 0.2f } + 1).coerceAtLeast(0) % durations.size]
+                            ScopeTogglePill(
+                                name = String.format(Locale.US, "%.1fs", focusPullDurationSec),
+                                active = true,
+                                onToggle = { onSetFocusPullDuration(nextDur) }
+                            )
+                            if (focusPointA != null || focusPointB != null) {
+                                ScopeTogglePill(
+                                    name = "CLEAR",
+                                    active = false,
+                                    onToggle = onClearFocusPullPoints
+                                )
+                            }
                         }
                     }
                 }
@@ -803,11 +853,7 @@ fun ProSettingsCards(
                                     value = grainIntensity.coerceIn(0f, 1f),
                                     onValueChange = onGrainIntensityChanged,
                                     valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = AppleYellow,
-                                        activeTrackColor = AppleYellow,
-                                        inactiveTrackColor = Color(0x33FFFFFF)
-                                    ),
+                                    colors = commixSliderColors(),
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -835,11 +881,7 @@ fun ProSettingsCards(
                                     value = lutBlend.coerceIn(0f, 1f),
                                     onValueChange = onLutBlendChanged,
                                     valueRange = 0f..1f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = AppleYellow,
-                                        activeTrackColor = AppleYellow,
-                                        inactiveTrackColor = Color(0x33FFFFFF)
-                                    ),
+                                    colors = commixSliderColors(),
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -903,14 +945,10 @@ fun ProSettingsCards(
                                     modifier = Modifier.width(105.dp)
                                 )
                                 Slider(
-                                    value = processZeroIntensity,
+                                    value = processZeroIntensity.coerceIn(0.1f, 1.0f),
                                     onValueChange = onProcessZeroIntensityChanged,
                                     valueRange = 0.1f..1.0f,
-                                    colors = SliderDefaults.colors(
-                                        thumbColor = AppleYellow,
-                                        activeTrackColor = AppleYellow,
-                                        inactiveTrackColor = Color(0x33FFFFFF)
-                                    ),
+                                    colors = commixSliderColors(),
                                     modifier = Modifier.weight(1f)
                                 )
                             }
@@ -1002,14 +1040,10 @@ fun ProSettingsCards(
                                 modifier = Modifier.width(85.dp)
                             )
                             Slider(
-                                value = currentAudioGain,
+                                value = currentAudioGain.coerceIn(-12f, 18f),
                                 onValueChange = onAudioGainChanged,
                                 valueRange = -12f..18f,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = AppleYellow,
-                                    activeTrackColor = AppleYellow,
-                                    inactiveTrackColor = Color(0x33FFFFFF)
-                                ),
+                                colors = commixSliderColors(),
                                 modifier = Modifier.weight(1f)
                             )
                         }
@@ -1161,20 +1195,103 @@ fun ProSettingsCards(
                 }
 
                 ProControlTab.SCOPES -> {
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        item { ScopeTogglePill(name = "HISTOGRAM", active = showHistogram, onToggle = onToggleHistogram) }
-                        item { ScopeTogglePill(name = "WAVEFORM", active = showWaveform, onToggle = onToggleWaveform) }
-                        item { ScopeTogglePill(name = "RGB PARADE", active = showRgbParade, onToggle = onToggleRgbParade) }
-                        item { ScopeTogglePill(name = "V-SCOPE", active = showVectorscope, onToggle = onToggleVectorscope) }
-                        item { ScopeTogglePill(name = "HORIZON", active = showHorizon, onToggle = onToggleHorizon) }
-                        item { ScopeTogglePill(name = "GRID", active = showGrid, onToggle = onToggleGrid) }
-                        item { ScopeTogglePill(name = if (aeAfLocked) "AE/AF LOCKED" else "AE/AF LOCK", active = aeAfLocked, onToggle = onToggleAeAfLock) }
-                        item { ScopeTogglePill(name = "LENS CORR", active = lensCorrectionEnabled, onToggle = onToggleLensCorrection) }
-                        item { ScopeTogglePill(name = "SLATE", active = false, onToggle = onOpenSlate) }
-                        item { ScopeTogglePill(name = "AUTOMATION", active = false, onToggle = onOpenKeyframePresets) }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            item { ScopeTogglePill(name = if (showZebras) "ZEBRAS ${zebraThresholdIre}%" else "ZEBRAS", active = showZebras, onToggle = onToggleZebras) }
+                            if (showZebras) {
+                                item { ScopeTogglePill(name = "IRE ${zebraThresholdIre}% ↻", active = true, onToggle = onCycleZebraThreshold) }
+                            }
+                            item { ScopeTogglePill(name = "FALSE COLOR", active = showFalseColor, onToggle = onToggleFalseColor) }
+                            item { ScopeTogglePill(name = "SAFE AREA", active = showSafeAreaGuides, onToggle = onToggleSafeAreaGuides) }
+                            item { ScopeTogglePill(name = "HISTOGRAM", active = showHistogram, onToggle = onToggleHistogram) }
+                            item { ScopeTogglePill(name = "WAVEFORM", active = showWaveform, onToggle = onToggleWaveform) }
+                            item { ScopeTogglePill(name = "RGB PARADE", active = showRgbParade, onToggle = onToggleRgbParade) }
+                            item { ScopeTogglePill(name = "V-SCOPE", active = showVectorscope, onToggle = onToggleVectorscope) }
+                            item { ScopeTogglePill(name = "HORIZON", active = showHorizon, onToggle = onToggleHorizon) }
+                            item { ScopeTogglePill(name = "GRID", active = showGrid, onToggle = onToggleGrid) }
+                            item { ScopeTogglePill(name = if (aeAfLocked) "AE/AF LOCKED" else "AE/AF LOCK", active = aeAfLocked, onToggle = onToggleAeAfLock) }
+                            item { ScopeTogglePill(name = "SLATE", active = false, onToggle = onOpenSlate) }
+                            item { ScopeTogglePill(name = "AUTOMATION", active = false, onToggle = onOpenKeyframePresets) }
+                        }
+                    }
+                }
+
+                ProControlTab.PRESETS -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "CUSTOM CAMERA RIG MEMORY (C1 – C3)",
+                            color = AppleYellow,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.5.sp
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            listOf(1, 2, 3).forEach { slot ->
+                                val isSaved = slot in savedCustomSlots
+                                val isActive = activeCustomSlot == slot
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isActive) AppleYellow.copy(alpha = 0.16f) else CinemaSurfaceElevated)
+                                        .border(
+                                            width = if (isActive) 1.dp else 0.7.dp,
+                                            color = if (isActive) AppleYellow else CinemaGlassBorder,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .padding(6.dp)
+                                ) {
+                                    Text(
+                                        text = if (isSaved) "C$slot · READY" else "C$slot · EMPTY",
+                                        color = if (isActive) AppleYellow else if (isSaved) CinemaGreen else CinemaTextDim,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(5.dp))
+                                                .background(if (isSaved) AppleYellow else Color(0x1AFFFFFF))
+                                                .clickable { onLoadCustomPreset(slot) }
+                                                .padding(vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "LOAD",
+                                                color = if (isSaved) Color.Black else CinemaTextDim,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 9.5.sp
+                                            )
+                                        }
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .clip(RoundedCornerShape(5.dp))
+                                                .background(CinemaCyan.copy(alpha = 0.22f))
+                                                .clickable { onSaveCustomPreset(slot) }
+                                                .padding(vertical = 4.dp)
+                                        ) {
+                                            Text(
+                                                text = "SAVE",
+                                                color = CinemaCyan,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 9.5.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

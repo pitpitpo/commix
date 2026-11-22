@@ -9,22 +9,21 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MovieFilter
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.platform.testTag
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.*
+import com.txor.commix.ui.theme.*
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,51 +38,46 @@ fun CinemaSlateSheet(
     onDismiss: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
-    val clapperAngle = remember { Animatable(-25f) }
+    val clapperAngle = remember { Animatable(-18f) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color.Black
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(20.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp)
                 .navigationBarsPadding()
         ) {
-            Text(
-                text = "CINEMA PRODUCTION SLATE",
-                color = AppleYellow,
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                modifier = Modifier.padding(bottom = 16.dp)
+            CommixSheetHeader(
+                title = "Cinema Production Slate",
+                subtitle = "1kHz audio sync clapper & take counter",
+                icon = Icons.Default.MovieFilter,
+                badgeText = "R$roll · S$scene · T$take",
+                onDismiss = onDismiss
             )
+
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Clapper Stick
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(28.dp)
+                    .height(26.dp)
                     .rotate(clapperAngle.value)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color.White)
-                    .border(2.dp, Color.Black)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(CinemaTextLight)
+                    .border(2.dp, CinemaBlack, RoundedCornerShape(6.dp))
             )
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // Slate Board Body
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(CinemaCardDark)
-                    .border(2.dp, Color(0x33FFFFFF))
-                    .padding(16.dp)
-            ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            CommixSectionCard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     SlateStepperBox(
                         title = "ROLL",
                         value = roll,
@@ -101,7 +95,6 @@ fun CinemaSlateSheet(
                         },
                         modifier = Modifier.weight(1f)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
                     SlateStepperBox(
                         title = "SCENE",
                         value = scene,
@@ -115,7 +108,6 @@ fun CinemaSlateSheet(
                         },
                         modifier = Modifier.weight(1f)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
                     SlateStepperBox(
                         title = "TAKE",
                         value = take,
@@ -131,43 +123,32 @@ fun CinemaSlateSheet(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
                     text = specLabel,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
-                    color = Color.Gray
+                    color = CinemaTextDim
                 )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(18.dp))
 
-            // Clapper Action Button (Claps stick, emits sync tone, auto-increments Take)
-            Button(
+            CommixPrimaryButton(
+                text = "CLAP SLATE & SYNC AUDIO (1kHz)",
+                icon = Icons.Default.VolumeUp,
                 onClick = {
                     coroutineScope.launch {
                         onPlayTone()
                         clapperAngle.animateTo(0f, tween(80))
-                        clapperAngle.animateTo(-25f, tween(150))
+                        clapperAngle.animateTo(-18f, tween(150))
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = AppleYellow),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("clap_slate_button")
-            ) {
-                Text(
-                    text = "CLAP SLATE & SYNC AUDIO (1kHz)",
-                    color = Color.Black,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+                testTagName = "clap_slate_button"
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }
@@ -183,30 +164,46 @@ private fun SlateStepperBox(
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Color(0x1AFFFFFF))
+            .clip(RoundedCornerShape(10.dp))
+            .background(CinemaSurfaceElevated)
+            .border(0.6.dp, CinemaGlassBorder, RoundedCornerShape(10.dp))
             .padding(vertical = 8.dp, horizontal = 4.dp)
     ) {
-        Text(text = title, fontSize = 10.sp, color = Color.Gray, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-        Text(text = value, fontSize = 19.sp, color = CinemaTextLight, fontWeight = FontWeight.ExtraBold, maxLines = 1, softWrap = false)
+        Text(
+            text = title,
+            fontSize = 10.sp,
+            color = CinemaTextDim,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false
+        )
+        Text(
+            text = value,
+            fontSize = 19.sp,
+            color = CinemaTextLight,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.ExtraBold,
+            maxLines = 1,
+            softWrap = false
+        )
         Spacer(modifier = Modifier.height(6.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .size(32.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x26FFFFFF))
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(CinemaSubtleBg)
                     .clickable(onClick = onDecrement)
             ) {
-                Text("−", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Text("−", color = CinemaTextLight, fontSize = 15.sp, fontWeight = FontWeight.Bold)
             }
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .size(32.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0x26FFD60A))
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(AppleYellow.copy(alpha = 0.2f))
                     .clickable(onClick = onIncrement)
             ) {
                 Text("+", color = AppleYellow, fontSize = 15.sp, fontWeight = FontWeight.Bold)

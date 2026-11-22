@@ -13,8 +13,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Hexagon
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,13 +35,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.txor.commix.CameraProbeResult
 import com.txor.commix.LensProbeService
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaAmber
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaCyan
-import com.txor.commix.ui.theme.CinemaGlass
-import com.txor.commix.ui.theme.CinemaGlassBorder
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.CommixBadgePill
+import com.txor.commix.ui.components.CommixModalBottomSheet
+import com.txor.commix.ui.components.CommixSheetHeader
+import com.txor.commix.ui.theme.*
 import java.util.Locale
 
 /**
@@ -52,7 +53,7 @@ fun HardwareLensModal(
     onProbeAll: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var manualIdText by remember { mutableStateOf(activeCameraId) }
+    var manualIdText by remember(activeCameraId) { mutableStateOf(activeCameraId) }
     var isProbing by remember { mutableStateOf(false) }
     var selectedFilter by remember { mutableStateOf("ALL") }
 
@@ -69,87 +70,30 @@ fun HardwareLensModal(
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = CinemaCardDark,
-        dragHandle = null,
-        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp)
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp)
+                .padding(horizontal = 18.dp, vertical = 6.dp)
                 .navigationBarsPadding()
         ) {
-            // Header Row: Icon + Title + Active ID Pill + Done button
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Hexagon,
-                        contentDescription = "Lens Engine",
-                        tint = AppleYellow,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "UNIVERSAL LENS ENGINE",
-                        color = Color.White,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 13.sp,
-                        letterSpacing = 0.5.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0x33FFD60A))
-                            .border(0.6.dp, AppleYellow.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "ID $activeCameraId",
-                            color = AppleYellow,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 10.sp,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-
-                Text(
-                    text = "Done",
-                    color = AppleYellow,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .clickable { onDismiss() }
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
+            CommixSheetHeader(
+                title = "Universal Lens Engine",
+                subtitle = "Logical, physical & OEM auxiliary sensors",
+                icon = Icons.Default.Hexagon,
+                iconTint = AppleYellow,
+                badgeText = "ID $activeCameraId",
+                onDismiss = onDismiss
+            )
 
             // Deep Multi-Range Sensor Scan Button
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 44.dp)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0x26FFD60A))
+                    .background(AppleYellow.copy(alpha = 0.16f))
                     .border(0.8.dp, AppleYellow.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
                     .testTag("probe_all_lenses_button")
                     .clickable {
@@ -191,56 +135,55 @@ fun HardwareLensModal(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Filter Chips Row + Sensor Count
+            // Filter Chips Row
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
-                ) {
-                    val filters = listOf(
-                        "ALL" to "ALL (${cameras.size})",
-                        "REAR" to "REAR (${cameras.count { !it.isFront }})",
-                        "FRONT" to "FRONT (${cameras.count { it.isFront }})",
-                        "PHYSICAL" to "AUX/PHYS (${cameras.count { it.parentLogicalId != null || it.discoverySource.equals("PHYSICAL", ignoreCase = true) || it.discoverySource.equals("AUX_SCAN", ignoreCase = true) }})"
-                    )
-                    filters.forEach { (key, label) ->
-                        val active = selectedFilter == key
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (active) AppleYellow else CinemaGlass)
-                                .border(
-                                    0.6.dp,
-                                    if (active) AppleYellow else CinemaGlassBorder,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .clickable { selectedFilter = key }
-                                .padding(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = label,
-                                color = if (active) Color.Black else CinemaTextLight,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 9.5.sp
+                val filters = listOf(
+                    "ALL" to "ALL (${cameras.size})",
+                    "REAR" to "REAR (${cameras.count { !it.isFront }})",
+                    "FRONT" to "FRONT (${cameras.count { it.isFront }})",
+                    "PHYSICAL" to "AUX/PHYS (${cameras.count { it.parentLogicalId != null || it.discoverySource.equals("PHYSICAL", ignoreCase = true) || it.discoverySource.equals("AUX_SCAN", ignoreCase = true) }})"
+                )
+                filters.forEach { (key, label) ->
+                    val active = selectedFilter == key
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (active) AppleYellow else CinemaSurface)
+                            .border(
+                                0.8.dp,
+                                if (active) AppleYellow else CinemaGlassBorder,
+                                RoundedCornerShape(9.dp)
                             )
-                        }
+                            .testTag("lens_filter_$key")
+                            .clickable { selectedFilter = key }
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = label,
+                            color = if (active) CinemaBlack else CinemaTextLight,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             // List of Discovered Camera Sensors
             LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)
-                    .heightIn(max = 300.dp)
+                    .heightIn(max = 320.dp)
             ) {
                 items(filteredCameras, key = { it.cameraId }) { cam ->
                     val isSelected = cam.cameraId == activeCameraId
@@ -269,17 +212,18 @@ fun HardwareLensModal(
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (isSelected) Color(0x28FFD60A) else Color(0x14FFFFFF))
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (isSelected) AppleYellow.copy(alpha = 0.16f) else CinemaSurface)
                             .border(
-                                width = if (isSelected) 1.4.dp else 0.7.dp,
+                                width = if (isSelected) 1.4.dp else 0.8.dp,
                                 color = if (isSelected) AppleYellow else CinemaGlassBorder,
-                                shape = RoundedCornerShape(12.dp)
+                                shape = RoundedCornerShape(14.dp)
                             )
+                            .testTag("lens_card_${cam.cameraId}")
                             .clickable { onSelectCamera(cam.cameraId) }
-                            .padding(horizontal = 12.dp, vertical = 9.dp)
+                            .padding(horizontal = 12.dp, vertical = 10.dp)
                     ) {
-                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.fillMaxWidth()
@@ -290,12 +234,12 @@ fun HardwareLensModal(
                                     modifier = Modifier
                                         .defaultMinSize(minWidth = 44.dp)
                                         .clip(RoundedCornerShape(8.dp))
-                                        .background(if (isSelected) AppleYellow else Color(0x26FFFFFF))
+                                        .background(if (isSelected) AppleYellow else CinemaSurfaceElevated)
                                         .padding(horizontal = 7.dp, vertical = 5.dp)
                                 ) {
                                     Text(
                                         text = badge,
-                                        color = if (isSelected) Color.Black else AppleYellow,
+                                        color = if (isSelected) CinemaBlack else AppleYellow,
                                         fontWeight = FontWeight.Black,
                                         fontFamily = FontFamily.Monospace,
                                         fontSize = 11.sp
@@ -305,7 +249,7 @@ fun HardwareLensModal(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = "$lensName  [ID ${cam.cameraId}]",
-                                        color = if (isSelected) AppleYellow else Color.White,
+                                        color = if (isSelected) AppleYellow else CinemaTextLight,
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 12.5.sp,
                                         maxLines = 1,
@@ -320,42 +264,18 @@ fun HardwareLensModal(
                                     }.joinToString(" · ")
                                     Text(
                                         text = metaParts,
-                                        color = CinemaTextLight,
+                                        color = CinemaTextDim,
                                         fontSize = 10.sp,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(6.dp))
-                                if (isSelected) {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(AppleYellow)
-                                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "ACTIVE",
-                                            color = Color.Black,
-                                            fontSize = 9.5.sp,
-                                            fontWeight = FontWeight.Black
-                                        )
-                                    }
-                                } else {
-                                    Box(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color(0x2EFFFFFF))
-                                            .padding(horizontal = 9.dp, vertical = 4.dp)
-                                    ) {
-                                        Text(
-                                            text = "USE",
-                                            color = Color.White,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                    }
-                                }
+                                CommixBadgePill(
+                                    text = if (isSelected) "ACTIVE" else "USE",
+                                    accentColor = if (isSelected) AppleYellow else CinemaTextLight,
+                                    filled = isSelected
+                                )
                             }
 
                             // Hardware Capability Tags Row
@@ -372,10 +292,10 @@ fun HardwareLensModal(
                                 if (cam.supports10Bit) add("10-BIT" to CinemaCyan)
                                 if (cam.isUltraHighRes) add("HI-RES" to CinemaAmber)
                                 if (cam.isPeriscope) add("PERISCOPE" to AppleYellow)
-                                if (cam.isMonochrome) add("MONO" to Color.White)
+                                if (cam.isMonochrome) add("MONO" to CinemaTextLight)
                                 if (cam.parentLogicalId != null) add("VIA LOGICAL ${cam.parentLogicalId}" to CinemaAmber)
                                 if (cam.discoverySource.equals("AUX_SCAN", ignoreCase = true)) add("OEM AUX" to CinemaAmber)
-                                add(hwLevelLabel to CinemaTextLight)
+                                add(hwLevelLabel to CinemaTextDim)
                             }
                             if (caps.isNotEmpty()) {
                                 Row(
@@ -383,21 +303,11 @@ fun HardwareLensModal(
                                     modifier = Modifier.horizontalScroll(rememberScrollState())
                                 ) {
                                     caps.forEach { (tag, tint) ->
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(4.dp))
-                                                .background(tint.copy(alpha = 0.14f))
-                                                .border(0.5.dp, tint.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
-                                                .padding(horizontal = 5.dp, vertical = 1.5.dp)
-                                        ) {
-                                            Text(
-                                                text = tag,
-                                                color = tint,
-                                                fontSize = 8.5.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                fontFamily = FontFamily.Monospace
-                                            )
-                                        }
+                                        CommixBadgePill(
+                                            text = tag,
+                                            accentColor = tint,
+                                            monospace = true
+                                        )
                                     }
                                 }
                             }
@@ -412,10 +322,10 @@ fun HardwareLensModal(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0x14FFFFFF))
-                    .border(0.6.dp, CinemaGlassBorder, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CinemaSurface)
+                    .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -424,25 +334,27 @@ fun HardwareLensModal(
                     Text(
                         text = "Force ID:",
                         color = CinemaTextLight,
-                        fontSize = 11.sp,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         softWrap = false
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Box(
                         modifier = Modifier
-                            .width(58.dp)
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(Color(0x22FFFFFF))
-                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .width(64.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(CinemaSurfaceElevated)
+                            .border(0.6.dp, CinemaGlassBorder, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 7.dp)
                     ) {
                         BasicTextField(
                             value = manualIdText,
                             onValueChange = { manualIdText = it.trim().take(4) },
                             singleLine = true,
                             textStyle = TextStyle(
-                                color = Color.White,
-                                fontSize = 12.sp,
+                                color = CinemaTextLight,
+                                fontSize = 12.5.sp,
                                 fontFamily = FontFamily.Monospace
                             ),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -452,18 +364,19 @@ fun HardwareLensModal(
                     Spacer(modifier = Modifier.weight(1f))
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(7.dp))
+                            .clip(RoundedCornerShape(9.dp))
                             .background(AppleYellow)
+                            .testTag("direct_switch_lens_button")
                             .clickable {
                                 if (manualIdText.isNotEmpty()) {
                                     onSelectCamera(manualIdText)
                                 }
                             }
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
                     ) {
                         Text(
                             text = "Direct Switch",
-                            color = Color.Black,
+                            color = CinemaBlack,
                             fontWeight = FontWeight.Bold,
                             fontSize = 11.5.sp,
                             maxLines = 1,
@@ -472,6 +385,7 @@ fun HardwareLensModal(
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }

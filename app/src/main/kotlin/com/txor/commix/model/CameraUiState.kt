@@ -44,6 +44,12 @@ data class CameraUiState(
     // Optics & Stabilization
     val oisMode: String = "standard",
     val eisMode: String = "legend",
+    val stabilizationEngineMode: String = com.txor.commix.StabilizationPolicyEngine.ENGINE_HYBRID,
+    val stabilizationApplyWhen: String = com.txor.commix.StabilizationPolicyEngine.APPLY_ALWAYS,
+    val photoAutoLevelEnabled: Boolean = false,
+    val gyroflowExportEnabled: Boolean = true,
+    val stabilizationActiveLabel: String = "HYBRID HW+SW",
+    val hasGyroSensor: Boolean = true,
     val flashMode: String = "off",
 
     // Color Science & Process Zero
@@ -82,6 +88,10 @@ data class CameraUiState(
     val showWaveform: Boolean = false,
     val showRgbParade: Boolean = false,
     val showVectorscope: Boolean = false,
+    val showZebras: Boolean = false,
+    val zebraThresholdIre: Int = 95,
+    val showFalseColor: Boolean = false,
+    val showSafeAreaGuides: Boolean = false,
     val showHorizonLeveler: Boolean = false,
     val showGrid: Boolean = false,
     val showProControls: Boolean = false,
@@ -89,6 +99,11 @@ data class CameraUiState(
     val pitchDeg: Float = 0.0f,
     val rollDeg: Float = 0.0f,
     val sensorOrientation: Int = 90,
+
+    // Live 32x24 Y-plane IRE grid for real-time Zebras & False Color
+    val lumaGrid: FloatArray = FloatArray(0),
+    val lumaGridW: Int = 32,
+    val lumaGridH: Int = 24,
 
     // Telemetry & Best Shot
     val lumaHistogram: IntArray = IntArray(256),
@@ -136,6 +151,11 @@ data class CameraUiState(
     val isPanoramaCapturing: Boolean = false,
     val panoramaCapturedFrames: Int = 0,
     val is360SphereMode: Boolean = false,
+    val panoramaDirection: Int = 1, // +1 = Left->Right, -1 = Right->Left
+    val panoramaVerticalDriftDeg: Float = 0f,
+    val panoramaSpeedDegPerSec: Float = 0f,
+    val panoramaGuidanceHint: String = "",
+    val panoramaGuidanceSeverity: String = "OK",
     // Spatial 180° VR Hemisphere & 360° Equirectangular Sphere Mode
     val spatialFovDeg: Int = 180, // 180 or 360
     val isSpatialCapturing: Boolean = false,
@@ -171,7 +191,7 @@ data class CameraUiState(
     val nightTone: String = "neutral",
     val slowMoFps: Int = 120,
     val timeLapseIntervalSec: Int = 2,
-    val automationTriggerMode: String = "timer",
+    val automationTriggerMode: String = "timer_3s",
     val automationListeningLabel: String? = null,
     val queueWorkerThreads: Int = 2,
     val queueAutoQueueStacking: Boolean = true,
@@ -185,7 +205,19 @@ data class CameraUiState(
     val longExposureFrames: Int = 8,
     val focusStackEnabled: Boolean = false,
     val focusStackSlices: Int = 5,
-    val multiExposureMode: String = "off" // "off", "additive", "average", "lighten", "darken"
+    val multiExposureMode: String = "off", // "off", "additive", "average", "lighten", "darken"
+
+    // Market Pro Features: Focus Pull A-B, Custom Presets C1-C3, Burst, Slow-Mo Playback, Intervalometer, Night Red UI
+    val focusPointA: Float? = null,
+    val focusPointB: Float? = null,
+    val focusPullDurationSec: Float = 2.0f,
+    val isFocusPullRunning: Boolean = false,
+    val savedCustomSlots: Set<Int> = emptySet(),
+    val activeCustomSlot: Int? = null,
+    val burstShotCount: Int = 0, // 0 = Single, 3 / 5 / 10 continuous burst
+    val slowMoPlaybackFps: Int = 30, // 24 / 30 / 60 playback speed
+    val timeLapseShotLimit: Int = 0, // 0 = Unlimited, 60 / 150 / 300 / 600 frames
+    val nightRedUiEnabled: Boolean = false
 ) {
     /** Snapshot of the active mode's exposure/optics settings, for stashing on a mode switch. */
     fun currentModeSettings(): ModeSettings = ModeSettings(
@@ -268,3 +300,55 @@ data class ModeSettings(
     val isProcessZero: Boolean = false,
     val showProControls: Boolean = false
 )
+
+/**
+ * Serializable custom rig memory preset (C1 / C2 / C3) — DSLR/ProShot-style 1-tap recall.
+ */
+@Immutable
+data class CustomRigPreset(
+    val slot: Int,
+    val iso: Int = 0,
+    val shutterNs: Long = 0L,
+    val evStops: Float = 0f,
+    val wbKelvin: Int = 0,
+    val wbTint: Float = 0f,
+    val focusDiopters: Float = -1f,
+    val toneCurve: String = "neutral",
+    val lutLook: String = "none",
+    val photoFormat: String = "jpeg",
+    val stabilizationEngineMode: String = com.txor.commix.StabilizationPolicyEngine.ENGINE_HYBRID,
+    val stabilizationApplyWhen: String = com.txor.commix.StabilizationPolicyEngine.APPLY_ALWAYS,
+    val isProcessZero: Boolean = false
+) {
+    fun encode(): String = listOf(
+        slot, iso, shutterNs, evStops, wbKelvin, wbTint, focusDiopters,
+        toneCurve, lutLook, photoFormat, stabilizationEngineMode, stabilizationApplyWhen, isProcessZero
+    ).joinToString("|")
+
+    companion object {
+        fun decode(raw: String?): CustomRigPreset? {
+            if (raw.isNullOrBlank()) return null
+            val p = raw.split("|")
+            if (p.size < 13) return null
+            return try {
+                CustomRigPreset(
+                    slot = p[0].toInt(),
+                    iso = p[1].toInt(),
+                    shutterNs = p[2].toLong(),
+                    evStops = p[3].toFloat(),
+                    wbKelvin = p[4].toInt(),
+                    wbTint = p[5].toFloat(),
+                    focusDiopters = p[6].toFloat(),
+                    toneCurve = p[7],
+                    lutLook = p[8],
+                    photoFormat = p[9],
+                    stabilizationEngineMode = com.txor.commix.StabilizationPolicyEngine.normalizeEngineMode(p[10]),
+                    stabilizationApplyWhen = com.txor.commix.StabilizationPolicyEngine.normalizeApplyWhen(p[11]),
+                    isProcessZero = p[12].toBoolean()
+                )
+            } catch (_: Throwable) {
+                null
+            }
+        }
+    }
+}

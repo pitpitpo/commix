@@ -23,18 +23,17 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.txor.commix.ui.theme.AppleYellow
+import com.txor.commix.ui.theme.*
 import kotlinx.coroutines.launch
 
 /**
- * 1:1 Apple Cinema Mode Carousel matching Flutter's lib/widgets/mode_carousel.dart
- * and screen_installed.png / screen_main_settings.png.
+ * Cinema Mode Carousel supporting all 11 camera modes with unified glass/accent tokens.
  */
 @Composable
 fun ModeCarousel(
@@ -62,7 +61,8 @@ fun ModeCarousel(
         contentPadding = PaddingValues(horizontal = 24.dp),
         modifier = modifier
             .fillMaxWidth()
-            .height(48.dp)
+            .height(44.dp)
+            .testTag("mode_carousel")
     ) {
         itemsIndexed(
             items = modes,
@@ -70,18 +70,20 @@ fun ModeCarousel(
         ) { index, mode ->
             val isSelected = (mode == activeMode)
             val icon = getModeIcon(mode)
+            val activeAccent = if (mode == "SPATIAL") CinemaCyan else AppleYellow
 
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
                     .background(
-                        if (isSelected) Color(0x33FFD60A) else Color(0x15FFFFFF)
+                        if (isSelected) activeAccent.copy(alpha = 0.20f) else CinemaSurface.copy(alpha = 0.85f)
                     )
                     .border(
-                        width = if (isSelected) 1.5.dp else 0.8.dp,
-                        color = if (isSelected) AppleYellow else Color(0x22FFFFFF),
+                        width = if (isSelected) 1.3.dp else 0.8.dp,
+                        color = if (isSelected) activeAccent else CinemaGlassBorder,
                         shape = RoundedCornerShape(16.dp)
                     )
+                    .testTag("mode_pill_${mode.lowercase().replace(" ", "_").replace("-", "_")}")
                     .clickable {
                         if (!isSelected) {
                             onModeSelected(mode)
@@ -97,7 +99,7 @@ fun ModeCarousel(
                             }
                         }
                     }
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -106,16 +108,16 @@ fun ModeCarousel(
                     Icon(
                         imageVector = icon,
                         contentDescription = mode,
-                        tint = if (isSelected) AppleYellow else Color(0xFF8E8E93),
+                        tint = if (isSelected) activeAccent else CinemaGrey,
                         modifier = Modifier.size(13.dp)
                     )
                     Spacer(modifier = Modifier.width(5.dp))
                     Text(
                         text = mode,
-                        color = if (isSelected) AppleYellow else Color.White,
-                        fontSize = 12.sp,
+                        color = if (isSelected) activeAccent else CinemaTextLight,
+                        fontSize = 11.5.sp,
                         fontWeight = if (isSelected) FontWeight.Black else FontWeight.SemiBold,
-                        letterSpacing = 0.6.sp,
+                        letterSpacing = 0.55.sp,
                         maxLines = 1,
                         softWrap = false
                     )

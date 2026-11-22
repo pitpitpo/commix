@@ -271,6 +271,25 @@ object AutomationEngine {
     }
 
     /**
+     * C++ KeyframeEngine writes `-999.0f` for EV when no EV track is configured, `-1.0f` for
+     * zoom/focus, and `-1` for ISO/shutter/WB. Using `!= 0f` for EV erroneously applies `-999 EV`
+     * on presets without an EV track and skips legitimate `0.0 EV` ramp crossings.
+     */
+    const val NATIVE_EV_UNSET_THRESHOLD = -500f
+
+    fun decodeNativeTickValues(nativeValues: FloatArray): AutomationValues {
+        if (nativeValues.size < 6) return AutomationValues()
+        return AutomationValues(
+            zoom = if (nativeValues[0] > 0f) nativeValues[0].toDouble() else null,
+            iso = if (nativeValues[1] > 0f) nativeValues[1].toInt() else null,
+            shutterNs = if (nativeValues[2] > 0f) nativeValues[2].toLong() else null,
+            ev = if (nativeValues[3] > NATIVE_EV_UNSET_THRESHOLD) nativeValues[3] else null,
+            wbKelvin = if (nativeValues[4] > 0f) nativeValues[4].toInt() else null,
+            focusDiopters = if (nativeValues[5] >= 0f) nativeValues[5] else null
+        )
+    }
+
+    /**
      * Stop C++ NativeEngineBridge keyframe engine.
      */
     fun stopNativeBridge() {

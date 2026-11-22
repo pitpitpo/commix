@@ -3,6 +3,7 @@ package com.txor.commix.ui.modals
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,22 +12,22 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.txor.commix.automation.AutomationEngine
 import com.txor.commix.automation.AutomationPresetConfig
-import com.txor.commix.ui.theme.AppleYellow
-import com.txor.commix.ui.theme.CinemaCardDark
-import com.txor.commix.ui.theme.CinemaTextLight
+import com.txor.commix.ui.components.*
+import com.txor.commix.ui.theme.*
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -36,19 +37,24 @@ fun AutomationModal(
     activeTriggerMode: String = "timer_3s",
     maxZoom: Double = 30.0,
     onSelectPreset: (String) -> Unit = {},
+    onSelectTrigger: (String) -> Unit = {},
     onStartPreset: (presetId: String, triggerMode: String) -> Unit = { _, _ -> },
     onStartCustom: (durationSec: Double, startZoom: Double, endZoom: Double, startEv: Float, endEv: Float, startFocus: Float, endFocus: Float, triggerMode: String) -> Unit = { _, _, _, _, _, _, _, _ -> },
     onStartAutomation: ((durationSec: Double, startZoom: Double, endZoom: Double, startEv: Float, endEv: Float, startFocus: Float, endFocus: Float) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     var selectedTab by remember { mutableIntStateOf(0) } // 0: Presets, 1: Custom
-    var selectedPresetId by remember { mutableStateOf(activePresetId) }
-    var triggerMode by remember { mutableStateOf(activeTriggerMode) }
+    var selectedPresetId by remember(activePresetId) { mutableStateOf(activePresetId) }
+    var triggerMode by remember(activeTriggerMode) {
+        mutableStateOf(CommixModeCatalog.normalizeAutomationTrigger(activeTriggerMode))
+    }
+
+    val safeMaxZoom = maxZoom.toFloat().coerceAtLeast(10f)
 
     // Custom controls state
     var durationSec by remember { mutableFloatStateOf(10.0f) }
     var startZoom by remember { mutableFloatStateOf(1.0f) }
-    var endZoom by remember { mutableFloatStateOf(3.5f) }
+    var endZoom by remember { mutableFloatStateOf(3.5f.coerceAtMost(safeMaxZoom)) }
     var enableZoomRamp by remember { mutableStateOf(true) }
 
     var startEv by remember { mutableFloatStateOf(0.0f) }
@@ -59,73 +65,55 @@ fun AutomationModal(
     var endFocus by remember { mutableFloatStateOf(5.0f) }
     var enableFocusRamp by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = Color(0xF0121214),
-        dragHandle = { BottomSheetDefaults.DragHandle(color = Color(0x4DFFFFFF)) }
-    ) {
+    CommixModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.88f)
-                .padding(horizontal = 18.dp, vertical = 6.dp)
+                .padding(horizontal = 18.dp, vertical = 4.dp)
                 .navigationBarsPadding()
         ) {
-            // Header Row
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 10.dp)
-            ) {
-                Text(
-                    text = "MOTION AUTOMATION",
-                    color = AppleYellow,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                TextButton(onClick = onDismiss) {
-                    Text("Close", color = Color.White, fontSize = 14.sp, maxLines = 1, softWrap = false)
-                }
-            }
+            CommixSheetHeader(
+                title = "Motion Automation",
+                subtitle = "Keyframe presets & custom motion ramps",
+                icon = Icons.Default.ElectricBolt,
+                iconTint = AppleYellow,
+                onDismiss = onDismiss
+            )
 
-            // Top Tab Selector (Presets vs Custom)
-            TabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = Color(0xFF1C1C1E),
-                contentColor = AppleYellow,
+            // Segmented Tab Selector (Presets vs Custom)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(CinemaSurface)
+                    .border(0.8.dp, CinemaGlassBorder, RoundedCornerShape(12.dp))
+                    .padding(4.dp)
             ) {
-                Tab(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    text = {
+                listOf(0 to "BUILT-IN PRESETS", 1 to "CUSTOM MOTION").forEach { (idx, label) ->
+                    val isSelected = selectedTab == idx
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 38.dp)
+                            .clip(RoundedCornerShape(9.dp))
+                            .background(if (isSelected) AppleYellow else CinemaSurface)
+                            .testTag("automation_tab_$idx")
+                            .clickable { selectedTab = idx }
+                            .padding(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
                         Text(
-                            "BUILT-IN PRESETS",
-                            fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 12.sp,
-                            color = if (selectedTab == 0) AppleYellow else Color.Gray
+                            text = label,
+                            color = if (isSelected) CinemaBlack else CinemaTextDim,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            fontSize = 11.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                )
-                Tab(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    text = {
-                        Text(
-                            "CUSTOM MOTION",
-                            fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal,
-                            fontSize = 12.sp,
-                            color = if (selectedTab == 1) AppleYellow else Color.Gray
-                        )
-                    }
-                )
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -133,12 +121,11 @@ fun AutomationModal(
             // Body Area
             Box(modifier = Modifier.weight(1f)) {
                 if (selectedTab == 0) {
-                    // Presets List
                     LazyColumn(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(AutomationEngine.BUILT_IN_PRESETS) { preset ->
+                        items(AutomationEngine.BUILT_IN_PRESETS, key = { it.id }) { preset ->
                             val isSelected = (preset.id == selectedPresetId)
                             PresetCard(
                                 preset = preset,
@@ -151,31 +138,30 @@ fun AutomationModal(
                         }
                     }
                 } else {
-                    // Custom Motion Controls
                     val scrollState = rememberScrollState()
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .verticalScroll(scrollState),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         // Duration Card
-                        AutomationCard(title = "Sequence Duration: ${durationSec.toInt()}s") {
+                        CommixSectionCard(title = "Sequence Duration: ${durationSec.toInt()}s") {
                             Slider(
                                 value = durationSec,
                                 onValueChange = { durationSec = it },
                                 valueRange = 3f..30f,
                                 steps = 26,
-                                colors = SliderDefaults.colors(thumbColor = AppleYellow, activeTrackColor = AppleYellow)
+                                colors = commixSliderColors()
                             )
                         }
 
                         // Zoom Ramp Card
-                        AutomationCard(title = "Zoom Ramping Track") {
+                        CommixSectionCard(title = "Zoom Ramping Track") {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                 Text(
                                     text = if (enableZoomRamp) String.format(Locale.US, "%.1f× → %.1f×", startZoom, endZoom) else "Disabled",
-                                    color = if (enableZoomRamp) AppleYellow else Color.Gray,
+                                    color = if (enableZoomRamp) AppleYellow else CinemaTextDim,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
                                     modifier = Modifier.weight(1f)
@@ -183,34 +169,34 @@ fun AutomationModal(
                                 Switch(
                                     checked = enableZoomRamp,
                                     onCheckedChange = { enableZoomRamp = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AppleYellow)
+                                    colors = commixSwitchColors()
                                 )
                             }
                             if (enableZoomRamp) {
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text(text = "Start Zoom: ${String.format(Locale.US, "%.1f×", startZoom)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "Start Zoom: ${String.format(Locale.US, "%.1f×", startZoom)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = startZoom,
+                                    value = startZoom.coerceIn(1.0f, safeMaxZoom),
                                     onValueChange = { startZoom = it },
-                                    valueRange = 1.0f..maxZoom.toFloat().coerceAtLeast(10f),
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    valueRange = 1.0f..safeMaxZoom,
+                                    colors = commixSliderColors()
                                 )
-                                Text(text = "End Zoom: ${String.format(Locale.US, "%.1f×", endZoom)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "End Zoom: ${String.format(Locale.US, "%.1f×", endZoom)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = endZoom,
+                                    value = endZoom.coerceIn(1.0f, safeMaxZoom),
                                     onValueChange = { endZoom = it },
-                                    valueRange = 1.0f..maxZoom.toFloat().coerceAtLeast(10f),
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    valueRange = 1.0f..safeMaxZoom,
+                                    colors = commixSliderColors()
                                 )
                             }
                         }
 
                         // EV Ramp Card
-                        AutomationCard(title = "Exposure Compensation Track") {
+                        CommixSectionCard(title = "Exposure Compensation Track") {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                 Text(
                                     text = if (enableEvRamp) String.format(Locale.US, "%+.1f EV → %+.1f EV", startEv, endEv) else "Disabled",
-                                    color = if (enableEvRamp) AppleYellow else Color.Gray,
+                                    color = if (enableEvRamp) AppleYellow else CinemaTextDim,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
                                     modifier = Modifier.weight(1f)
@@ -218,34 +204,34 @@ fun AutomationModal(
                                 Switch(
                                     checked = enableEvRamp,
                                     onCheckedChange = { enableEvRamp = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AppleYellow)
+                                    colors = commixSwitchColors()
                                 )
                             }
                             if (enableEvRamp) {
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text(text = "Start EV: ${String.format(Locale.US, "%+.1f", startEv)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "Start EV: ${String.format(Locale.US, "%+.1f", startEv)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = startEv,
+                                    value = startEv.coerceIn(-3.0f, 3.0f),
                                     onValueChange = { startEv = it },
                                     valueRange = -3.0f..3.0f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    colors = commixSliderColors()
                                 )
-                                Text(text = "End EV: ${String.format(Locale.US, "%+.1f", endEv)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "End EV: ${String.format(Locale.US, "%+.1f", endEv)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = endEv,
+                                    value = endEv.coerceIn(-3.0f, 3.0f),
                                     onValueChange = { endEv = it },
                                     valueRange = -3.0f..3.0f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    colors = commixSliderColors()
                                 )
                             }
                         }
 
                         // Focus Ramp Card
-                        AutomationCard(title = "Focus Pull Track") {
+                        CommixSectionCard(title = "Focus Pull Track") {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                                 Text(
                                     text = if (enableFocusRamp) String.format(Locale.US, "%.1f D → %.1f D", startFocus, endFocus) else "Disabled",
-                                    color = if (enableFocusRamp) AppleYellow else Color.Gray,
+                                    color = if (enableFocusRamp) AppleYellow else CinemaTextDim,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 12.sp,
                                     modifier = Modifier.weight(1f)
@@ -253,24 +239,24 @@ fun AutomationModal(
                                 Switch(
                                     checked = enableFocusRamp,
                                     onCheckedChange = { enableFocusRamp = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = AppleYellow)
+                                    colors = commixSwitchColors()
                                 )
                             }
                             if (enableFocusRamp) {
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text(text = "Near Focus (Start): ${String.format(Locale.US, "%.1f D", startFocus)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "Near Focus (Start): ${String.format(Locale.US, "%.1f D", startFocus)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = startFocus,
+                                    value = startFocus.coerceIn(0.0f, 10.0f),
                                     onValueChange = { startFocus = it },
                                     valueRange = 0.0f..10.0f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    colors = commixSliderColors()
                                 )
-                                Text(text = "Far Focus (End): ${String.format(Locale.US, "%.1f D", endFocus)}", color = CinemaTextLight, fontSize = 10.sp)
+                                Text(text = "Far Focus (End): ${String.format(Locale.US, "%.1f D", endFocus)}", color = CinemaTextLight, fontSize = 10.5.sp)
                                 Slider(
-                                    value = endFocus,
+                                    value = endFocus.coerceIn(0.0f, 10.0f),
                                     onValueChange = { endFocus = it },
                                     valueRange = 0.0f..10.0f,
-                                    colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = AppleYellow)
+                                    colors = commixSliderColors()
                                 )
                             }
                         }
@@ -280,33 +266,41 @@ fun AutomationModal(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Trigger Selector
-            AutomationCard(title = "Trigger Mode") {
-                val triggers = listOf(
-                    "timer_3s" to "3s Timer",
-                    "timer_5s" to "5s Timer",
-                    "instant" to "Instant"
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    triggers.forEach { (key, label) ->
+            // Unified Canonical Trigger Selector (all 5 triggers from CommixModeCatalog)
+            CommixSectionCard(title = "Trigger Mode") {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                ) {
+                    CommixModeCatalog.AUTOMATION_TRIGGER_OPTIONS.forEach { (key, label) ->
                         val isSel = (key == triggerMode)
                         Box(
                             contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(if (isSel) AppleYellow else Color(0x1AFFFFFF))
-                                .clickable { triggerMode = key }
-                                .padding(horizontal = 4.dp, vertical = 8.dp)
+                                .heightIn(min = 36.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(if (isSel) AppleYellow else CinemaSurfaceElevated)
+                                .border(
+                                    width = 0.8.dp,
+                                    color = if (isSel) AppleYellow else CinemaGlassBorder,
+                                    shape = RoundedCornerShape(9.dp)
+                                )
+                                .testTag("automation_trigger_$key")
+                                .clickable {
+                                    triggerMode = key
+                                    onSelectTrigger(key)
+                                }
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
                         ) {
                             Text(
                                 text = label,
-                                color = if (isSel) Color.Black else Color.White,
-                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal,
-                                fontSize = 11.sp,
+                                color = if (isSel) CinemaBlack else CinemaTextLight,
+                                fontWeight = if (isSel) FontWeight.Bold else FontWeight.Medium,
+                                fontSize = 11.5.sp,
                                 maxLines = 1,
-                                softWrap = false,
-                                overflow = TextOverflow.Ellipsis
+                                softWrap = false
                             )
                         }
                     }
@@ -323,7 +317,10 @@ fun AutomationModal(
                 "START CUSTOM MOTION (${durationSec.toInt()}s)"
             }
 
-            Button(
+            CommixPrimaryButton(
+                text = buttonText,
+                icon = Icons.Default.PlayArrow,
+                testTagName = "execute_automation_button",
                 onClick = {
                     if (selectedTab == 0) {
                         onStartPreset(selectedPresetId, triggerMode)
@@ -351,24 +348,9 @@ fun AutomationModal(
                         )
                     }
                     onDismiss()
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = AppleYellow),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp)
-            ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.Black)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = buttonText,
-                    color = Color.Black,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.5.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+                }
+            )
+            Spacer(modifier = Modifier.height(8.dp))
         }
     }
 }
@@ -382,13 +364,14 @@ private fun PresetCard(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (isSelected) Color(0xFF2C2C2E) else Color(0xFF1C1C1E))
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isSelected) CinemaSurfaceElevated else CinemaSurface)
             .border(
-                width = if (isSelected) 1.5.dp else 1.dp,
-                color = if (isSelected) AppleYellow else Color(0x22FFFFFF),
-                shape = RoundedCornerShape(12.dp)
+                width = if (isSelected) 1.5.dp else 0.8.dp,
+                color = if (isSelected) AppleYellow else CinemaGlassBorder,
+                shape = RoundedCornerShape(14.dp)
             )
+            .testTag("automation_preset_${preset.id}")
             .clickable { onSelect() }
             .padding(14.dp)
     ) {
@@ -404,33 +387,23 @@ private fun PresetCard(
                 ) {
                     Text(
                         text = preset.title,
-                        color = if (isSelected) AppleYellow else Color.White,
+                        color = if (isSelected) AppleYellow else CinemaTextLight,
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.5.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false)
                     )
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0x33E5A93C))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(
-                            text = "${preset.durationSeconds.toInt()}s",
-                            color = AppleYellow,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
+                    CommixBadgePill(
+                        text = "${preset.durationSeconds.toInt()}s",
+                        accentColor = AppleYellow,
+                        monospace = true
+                    )
                 }
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = preset.description,
-                    color = CinemaTextLight,
+                    color = CinemaTextDim,
                     fontSize = 11.sp,
                     lineHeight = 15.sp
                 )
@@ -438,7 +411,7 @@ private fun PresetCard(
             if (isSelected) {
                 Icon(
                     imageVector = Icons.Default.Check,
-                    contentDescription = null,
+                    contentDescription = "Selected preset",
                     tint = AppleYellow,
                     modifier = Modifier
                         .size(20.dp)
@@ -446,19 +419,5 @@ private fun PresetCard(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun AutomationCard(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF1C1C1E))
-            .padding(12.dp)
-    ) {
-        Text(text = title, color = Color.White, fontSize = 11.5.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 6.dp))
-        content()
     }
 }
